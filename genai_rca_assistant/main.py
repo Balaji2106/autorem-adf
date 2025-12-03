@@ -619,6 +619,42 @@ Priority Guidelines:
 - P3: Fix within 2 hours - Medium severity
 - P4: Fix within 24 hours - Low severity
 
+AUTO-HEAL DECISION LOGIC - Set auto_heal_possible=true ONLY if error matches these criteria:
+
+FOR ADF ERRORS:
+✅ auto_heal_possible=true:
+  - GatewayTimeout (network timeout, retry helps)
+  - HttpConnectionFailed (transient connection issues)
+  - ThrottlingError (rate limiting, retry with backoff)
+  - InternalServerError (Azure transient errors)
+
+❌ auto_heal_possible=false:
+  - UserErrorSourceBlobNotExists (missing data, needs manual check)
+  - UserErrorColumnNameInvalid (schema mismatch, needs code fix)
+  - UserErrorInvalidDataType (data quality issue, needs investigation)
+  - UserErrorSqlOperationFailed (SQL logic error, needs query fix)
+  - AuthenticationError (credential issue, needs manual fix)
+  - UnknownError (unclear root cause, needs investigation)
+
+FOR DATABRICKS ERRORS:
+✅ auto_heal_possible=true:
+  - DatabricksClusterStartFailure (transient cluster issue, restart helps)
+  - DatabricksResourceExhausted (cluster overload, restart helps)
+  - DatabricksLibraryInstallationError (transient install issue, retry helps)
+  - DatabricksDriverNotResponding (driver crash, cluster restart helps)
+  - DatabricksTimeoutError (transient timeout, retry job helps)
+
+❌ auto_heal_possible=false:
+  - DatabricksPermissionDenied (access control issue, needs manual grant)
+  - DatabricksTableNotFound (missing table, needs data engineering fix)
+  - DatabricksSparkException (code logic error, needs notebook fix)
+  - DatabricksAuthenticationError (credential issue, needs token refresh)
+  - DatabricksNotebookExecutionError (code error, needs developer fix)
+  - UnknownError (unclear root cause, needs investigation)
+
+RULE: If error is transient/infrastructure-related → auto_heal_possible=true
+      If error is code/data/permission-related → auto_heal_possible=false
+
 IMPORTANT: In your root_cause, explicitly mention "{service_name}" (not any other service).
 Analyze logically - don't invent details. Use only what's in the message.
 Be specific about the affected entity (cluster name, job name, table name, etc.)
@@ -694,6 +730,42 @@ Priority Guidelines:
 - P2: Fix within 30 min - High severity, major impact
 - P3: Fix within 2 hours - Medium severity
 - P4: Fix within 24 hours - Low severity
+
+AUTO-HEAL DECISION LOGIC - Set auto_heal_possible=true ONLY if error matches these criteria:
+
+FOR ADF ERRORS:
+✅ auto_heal_possible=true:
+  - GatewayTimeout (network timeout, retry helps)
+  - HttpConnectionFailed (transient connection issues)
+  - ThrottlingError (rate limiting, retry with backoff)
+  - InternalServerError (Azure transient errors)
+
+❌ auto_heal_possible=false:
+  - UserErrorSourceBlobNotExists (missing data, needs manual check)
+  - UserErrorColumnNameInvalid (schema mismatch, needs code fix)
+  - UserErrorInvalidDataType (data quality issue, needs investigation)
+  - UserErrorSqlOperationFailed (SQL logic error, needs query fix)
+  - AuthenticationError (credential issue, needs manual fix)
+  - UnknownError (unclear root cause, needs investigation)
+
+FOR DATABRICKS ERRORS:
+✅ auto_heal_possible=true:
+  - DatabricksClusterStartFailure (transient cluster issue, restart helps)
+  - DatabricksResourceExhausted (cluster overload, restart helps)
+  - DatabricksLibraryInstallationError (transient install issue, retry helps)
+  - DatabricksDriverNotResponding (driver crash, cluster restart helps)
+  - DatabricksTimeoutError (transient timeout, retry job helps)
+
+❌ auto_heal_possible=false:
+  - DatabricksPermissionDenied (access control issue, needs manual grant)
+  - DatabricksTableNotFound (missing table, needs data engineering fix)
+  - DatabricksSparkException (code logic error, needs notebook fix)
+  - DatabricksAuthenticationError (credential issue, needs token refresh)
+  - DatabricksNotebookExecutionError (code error, needs developer fix)
+  - UnknownError (unclear root cause, needs investigation)
+
+RULE: If error is transient/infrastructure-related → auto_heal_possible=true
+      If error is code/data/permission-related → auto_heal_possible=false
 
 IMPORTANT: In your root_cause, explicitly mention "{service_name}" (not any other service).
 Analyze logically - don't invent details. Use only what's in the message.
