@@ -41,8 +41,18 @@ except ImportError:
 # --- Initialization & Configuration ---
 load_dotenv()
 RCA_API_KEY = os.getenv("RCA_API_KEY", "balaji-rca-secret-2025")
+
+# AI Provider Configuration
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()  # Options: gemini, ollama, auto
+
+# Gemini Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MODEL_ID = os.getenv("MODEL_ID", "models/gemini-2.5-flash")
+
+# Ollama Configuration
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:latest")
+
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_ALERT_CHANNEL = os.getenv("SLACK_ALERT_CHANNEL", "aiops-rca-alerts")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
@@ -93,6 +103,81 @@ PLAYBOOK_REGISTRY: Dict[str, Optional[str]] = {
     "DatabricksLibraryInstallationError": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES"),
     "DatabricksPermissionDenied": os.getenv("PLAYBOOK_CHECK_PERMISSIONS"),
 }
+
+# --- REMEDIABLE ERRORS CONFIGURATION ---
+REMEDIABLE_ERRORS: Dict[str, Dict] = {
+    # Transient/Network Errors - Retry Strategy
+    "GatewayTimeout": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+    },
+    "HttpConnectionFailed": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+    },
+    "ThrottlingError": {
+        "action": "retry_pipeline",
+        "max_retries": 5,
+        "backoff_seconds": [30, 60, 120, 300, 600],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+    },
+
+    # Databricks Cluster Errors
+    "DatabricksClusterStartFailure": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
+    },
+    "ClusterMemoryExhausted": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
+    },
+
+    # Databricks Library Errors
+    "DatabricksLibraryInstallationError": {
+        "action": "reinstall_libraries",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES")
+    },
+    "LibraryInstallationFailed": {
+        "action": "reinstall_libraries",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_REINSTALL_LIBRARIES")
+    },
+
+    # Databricks Job Errors
+    "DatabricksJobExecutionError": {
+        "action": "retry_job",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB")
+    },
+
+    # Conditional Remediation
+    "UserErrorSourceBlobNotExists": {
+        "action": "check_upstream",
+        "max_retries": 2,
+        "backoff_seconds": [300, 600],  # Wait 5 min, then 10 min
+        "playbook_url": os.getenv("PLAYBOOK_RERUN_UPSTREAM")
+    },
+}
+
+# Azure ADF API Configuration for monitoring
+AZURE_SUBSCRIPTION_ID = os.getenv("AZURE_SUBSCRIPTION_ID", "")
+AZURE_RESOURCE_GROUP = os.getenv("AZURE_RESOURCE_GROUP", "")
+AZURE_DATA_FACTORY_NAME = os.getenv("AZURE_DATA_FACTORY_NAME", "")
+AZURE_TENANT_ID = os.getenv("AZURE_TENANT_ID", "")
+AZURE_CLIENT_ID = os.getenv("AZURE_CLIENT_ID", "")
+AZURE_CLIENT_SECRET = os.getenv("AZURE_CLIENT_SECRET", "")
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger("aiops_rca")
@@ -215,16 +300,39 @@ def init_db():
                 last_login TEXT
             )
         """))
+
+        # Remediation attempts table
+        conn.execute(text("""
+            CREATE TABLE IF NOT EXISTS remediation_attempts (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                ticket_id TEXT NOT NULL,
+                original_run_id TEXT NOT NULL,
+                remediation_run_id TEXT,
+                attempt_number INTEGER NOT NULL,
+                status TEXT NOT NULL,
+                error_type TEXT,
+                remediation_action TEXT,
+                logic_app_response TEXT,
+                started_at TEXT NOT NULL,
+                completed_at TEXT,
+                duration_seconds INTEGER,
+                failure_reason TEXT
+            )
+        """))
         
         # Migration: Add columns if they don't exist
         migration_columns = {
-            "finops_team": "TEXT", 
-            "finops_owner": "TEXT", 
+            "finops_team": "TEXT",
+            "finops_owner": "TEXT",
             "finops_cost_center": "TEXT",
-            "blob_log_url": "TEXT", 
+            "blob_log_url": "TEXT",
             "itsm_ticket_id": "TEXT",
             "logic_app_run_id": "TEXT",
-            "processing_mode": "TEXT"
+            "processing_mode": "TEXT",
+            "remediation_status": "TEXT",
+            "remediation_run_id": "TEXT",
+            "remediation_attempts": "INTEGER DEFAULT 0",
+            "remediation_last_attempt_at": "TEXT"
         }
         
         for col, col_type in migration_columns.items():
@@ -527,6 +635,126 @@ Error Message:
         logger.warning("Gemini RCA failed: %s", e)
         return None
 
+def call_ollama_for_rca(description: str, source_type: str = "adf"):
+    """
+    Generate RCA using Ollama (local LLM like DeepSeek-R1) for both ADF and Databricks errors
+    source_type: "adf" or "databricks"
+    """
+    if not OLLAMA_HOST:
+        logger.warning("Ollama host not configured")
+        return None
+
+    # Define error types based on source
+    if source_type == "databricks":
+        error_types = """[DatabricksClusterStartFailure, DatabricksJobExecutionError, DatabricksNotebookExecutionError,
+DatabricksLibraryInstallationError, DatabricksPermissionDenied, DatabricksResourceExhausted,
+DatabricksDriverNotResponding, DatabricksSparkException, DatabricksTableNotFound,
+DatabricksAuthenticationError, DatabricksTimeoutError, UnknownError]"""
+        service_name = "Databricks"
+    else:
+        error_types = """[UserErrorSourceBlobNotExists, UserErrorColumnNameInvalid, GatewayTimeout,
+HttpConnectionFailed, InternalServerError, UserErrorInvalidDataType, UserErrorSqlOperationFailed,
+AuthenticationError, ThrottlingError, UnknownError]"""
+        service_name = "Azure Data Factory"
+
+    service_prefixed_desc = f"[{service_name.upper()}] {description}"
+
+    prompt = f"""
+You are an expert AIOps Root Cause Analysis assistant for {service_name}.
+
+CRITICAL: This error is from {service_name.upper()}, NOT from any other Azure service.
+DO NOT mention Azure Data Factory if this is a Databricks error.
+DO NOT mention Databricks if this is an Azure Data Factory error.
+
+Analyze the following {service_name} failure message and provide a precise, data-driven Root Cause Analysis.
+
+Your `error_type` MUST be a machine-readable code. Choose from this list:
+{error_types}
+
+Return a STRICT JSON in this format (NO markdown, NO extra text, NO thinking tags):
+{{
+  "root_cause": "Clear, concise explanation of what went wrong in {service_name}",
+  "error_type": "...",
+  "affected_entity": "Name of the specific resource/component that failed",
+  "severity": "Critical|High|Medium|Low",
+  "priority": "P1|P2|P3|P4",
+  "confidence": "Very High|High|Medium|Low",
+  "recommendations": ["Step 1: ...", "Step 2: ...", "Step 3: ..."],
+  "auto_heal_possible": true|false
+}}
+
+Severity Guidelines:
+- Critical: Production data loss, complete service outage, security breach
+- High: Major functionality broken, significant business impact
+- Medium: Partial functionality affected, workarounds available
+- Low: Minor issues, minimal business impact
+
+Priority Guidelines:
+- P1: Fix immediately (< 15 min) - Production down, Critical severity
+- P2: Fix within 30 min - High severity, major impact
+- P3: Fix within 2 hours - Medium severity
+- P4: Fix within 24 hours - Low severity
+
+IMPORTANT: In your root_cause, explicitly mention "{service_name}" (not any other service).
+Analyze logically - don't invent details. Use only what's in the message.
+Be specific about the affected entity (cluster name, job name, table name, etc.)
+
+Error Message:
+\"\"\"{service_prefixed_desc}\"\"\"
+
+Respond with ONLY the JSON object, no thinking tags, no markdown.
+"""
+
+    try:
+        # Call Ollama API
+        url = f"{OLLAMA_HOST.rstrip('/')}/api/generate"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json"
+        }
+
+        logger.info(f"[OLLAMA] Calling Ollama at {url} with model {OLLAMA_MODEL}")
+        response = requests.post(url, json=payload, timeout=120)
+
+        if response.status_code == 200:
+            result = response.json()
+            response_text = result.get("response", "")
+
+            # Clean up response - remove thinking tags if present (DeepSeek-R1 specific)
+            # DeepSeek-R1 sometimes wraps responses in <think>...</think> tags
+            if "<think>" in response_text:
+                # Extract only the JSON part after thinking
+                parts = response_text.split("</think>")
+                if len(parts) > 1:
+                    response_text = parts[-1].strip()
+
+            # Clean up markdown if present
+            response_text = response_text.strip().strip("`").replace("json", "").strip()
+
+            # Parse JSON
+            rca_data = json.loads(response_text)
+            logger.info(f"[OLLAMA] Successfully generated RCA using Ollama")
+            return rca_data
+        else:
+            logger.error(f"[OLLAMA] Ollama API returned status {response.status_code}: {response.text}")
+            return None
+
+    except requests.exceptions.Timeout:
+        logger.error("[OLLAMA] Ollama request timed out (120s)")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[OLLAMA] Cannot connect to Ollama at {OLLAMA_HOST}: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"[OLLAMA] Failed to parse Ollama response as JSON: {e}")
+        logger.error(f"[OLLAMA] Raw response: {response_text[:500]}")
+        return None
+    except Exception as e:
+        logger.warning(f"[OLLAMA] Ollama RCA failed: {e}")
+        return None
+
 def derive_priority(sev):
     sev = (sev or "").lower()
     return {"critical":"P1","high":"P2","medium":"P3","low":"P4"}.get(sev,"P3")
@@ -549,12 +777,67 @@ def fallback_rca(desc: str, source_type: str = "adf"):
     }
 
 def generate_rca_and_recs(desc, source_type="adf"):
-    ai = call_ai_for_rca(desc, source_type)
-    if ai:
-        ai.setdefault("priority", derive_priority(ai.get("severity")))
-        logger.info("AI RCA successful for %s", source_type.upper())
-        return ai
-    logger.warning("AI RCA failed for %s. Using fallback.", source_type.upper())
+    """
+    Generate RCA using configured AI provider(s)
+    AI_PROVIDER options: 'gemini', 'ollama', 'auto'
+    - gemini: Use Google Gemini only
+    - ollama: Use local Ollama only
+    - auto: Try Ollama first, fallback to Gemini, then to static fallback
+    """
+    ai = None
+
+    if AI_PROVIDER == "ollama":
+        # Use Ollama only
+        logger.info(f"[AI-PROVIDER] Using Ollama for RCA generation")
+        ai = call_ollama_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Ollama RCA successful for %s", source_type.upper())
+            return ai
+        logger.warning("Ollama RCA failed for %s. Using fallback.", source_type.upper())
+
+    elif AI_PROVIDER == "gemini":
+        # Use Gemini only
+        logger.info(f"[AI-PROVIDER] Using Gemini for RCA generation")
+        ai = call_ai_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Gemini RCA successful for %s", source_type.upper())
+            return ai
+        logger.warning("Gemini RCA failed for %s. Using fallback.", source_type.upper())
+
+    elif AI_PROVIDER == "auto":
+        # Auto mode: Try Ollama first, then Gemini, then fallback
+        logger.info(f"[AI-PROVIDER] Auto mode: Trying Ollama first, then Gemini")
+
+        # Try Ollama first
+        ai = call_ollama_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Ollama RCA successful for %s", source_type.upper())
+            return ai
+
+        logger.info("[AI-PROVIDER] Ollama failed, trying Gemini...")
+
+        # Try Gemini as fallback
+        ai = call_ai_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Gemini RCA successful for %s", source_type.upper())
+            return ai
+
+        logger.warning("Both Ollama and Gemini RCA failed for %s. Using fallback.", source_type.upper())
+
+    else:
+        # Unknown provider, default to Gemini
+        logger.warning(f"[AI-PROVIDER] Unknown AI_PROVIDER '{AI_PROVIDER}', defaulting to Gemini")
+        ai = call_ai_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Gemini RCA successful for %s", source_type.upper())
+            return ai
+
+    # All AI attempts failed, use static fallback
     return fallback_rca(desc, source_type)
 
 # --- ITSM Integration Functions ---
@@ -741,6 +1024,708 @@ def _http_post_with_retries(url: str, payload: dict, timeout: int = 60, retries:
     if isinstance(last, requests.Response):
         return last
     raise last if last else RuntimeError("HTTP post failed with unknown error")
+
+# --- Auto-Remediation Functions ---
+
+async def get_azure_access_token():
+    """
+    Get Azure AD access token for ADF API calls
+    Uses Managed Identity or Service Principal
+    """
+    try:
+        # Try Managed Identity first (for Azure App Service)
+        msi_endpoint = os.getenv("MSI_ENDPOINT")
+        msi_secret = os.getenv("MSI_SECRET")
+
+        if msi_endpoint and msi_secret:
+            response = requests.get(
+                msi_endpoint,
+                params={"resource": "https://management.azure.com/", "api-version": "2019-08-01"},
+                headers={"X-IDENTITY-HEADER": msi_secret},
+                timeout=5
+            )
+            return response.json()["access_token"]
+        elif AZURE_TENANT_ID and AZURE_CLIENT_ID and AZURE_CLIENT_SECRET:
+            # Service Principal fallback
+            token_url = f"https://login.microsoftonline.com/{AZURE_TENANT_ID}/oauth2/token"
+            data = {
+                "grant_type": "client_credentials",
+                "client_id": AZURE_CLIENT_ID,
+                "client_secret": AZURE_CLIENT_SECRET,
+                "resource": "https://management.azure.com/"
+            }
+            response = requests.post(token_url, data=data, timeout=5)
+            return response.json()["access_token"]
+    except Exception as e:
+        logger.error(f"Failed to get Azure access token: {e}")
+    return None
+
+
+async def trigger_auto_remediation(ticket_id: str, pipeline_name: str, error_type: str,
+                                     original_run_id: str, attempt_number: int = 1):
+    """
+    Triggers auto-remediation via Azure Logic App
+    Returns: dict with success status and remediation_run_id
+    """
+    logger.info(f"[AUTO-REM] Triggering auto-remediation for {ticket_id}, error: {error_type}, attempt: {attempt_number}")
+
+    # Check if error is remediable
+    if error_type not in REMEDIABLE_ERRORS:
+        logger.info(f"[AUTO-REM] Error type {error_type} is not auto-remediable")
+        return {"success": False, "message": "Error type not remediable"}
+
+    remediation_config = REMEDIABLE_ERRORS[error_type]
+
+    # Check retry limits
+    if attempt_number > remediation_config["max_retries"]:
+        logger.warning(f"[AUTO-REM] Max retries ({remediation_config['max_retries']}) exceeded for {ticket_id}")
+        return {"success": False, "message": "Max retries exceeded"}
+
+    # Get playbook URL
+    playbook_url = remediation_config["playbook_url"]
+    if not playbook_url:
+        logger.error(f"[AUTO-REM] No playbook URL configured for {error_type}")
+        return {"success": False, "message": "Playbook URL not configured"}
+
+    # Calculate backoff delay
+    if attempt_number > 1:
+        backoff_index = attempt_number - 2
+        if backoff_index < len(remediation_config["backoff_seconds"]):
+            delay = remediation_config["backoff_seconds"][backoff_index]
+            logger.info(f"[AUTO-REM] Waiting {delay}s before retry attempt {attempt_number}")
+            await asyncio.sleep(delay)
+
+    # Prepare payload for Logic App
+    payload = {
+        "pipeline_name": pipeline_name,
+        "ticket_id": ticket_id,
+        "error_type": error_type,
+        "original_run_id": original_run_id,
+        "retry_attempt": attempt_number,
+        "max_retries": remediation_config["max_retries"],
+        "remediation_action": remediation_config["action"],
+        "timestamp": datetime.now(timezone.utc).isoformat()
+    }
+
+    try:
+        # Call Logic App
+        response = _http_post_with_retries(playbook_url, payload, timeout=30, retries=3)
+
+        if response and response.status_code == 200:
+            response_data = response.json()
+            remediation_run_id = response_data.get("run_id", "N/A")
+
+            # Store remediation attempt
+            db_execute('''INSERT INTO remediation_attempts
+                        (ticket_id, original_run_id, remediation_run_id, attempt_number,
+                         status, error_type, remediation_action, logic_app_response, started_at)
+                        VALUES (:ticket_id, :original_run_id, :remediation_run_id, :attempt_number,
+                         :status, :error_type, :remediation_action, :logic_app_response, :started_at)''',
+                     {"ticket_id": ticket_id, "original_run_id": original_run_id, "remediation_run_id": remediation_run_id,
+                      "attempt_number": attempt_number, "status": "in_progress", "error_type": error_type,
+                      "remediation_action": remediation_config["action"], "logic_app_response": json.dumps(response_data),
+                      "started_at": datetime.now(timezone.utc).isoformat()})
+
+            # Update ticket
+            db_execute('''UPDATE tickets
+                        SET remediation_status = :status,
+                            remediation_run_id = :run_id,
+                            remediation_attempts = :attempts,
+                            remediation_last_attempt_at = :last_attempt
+                        WHERE id = :id''',
+                     {"status": "in_progress", "run_id": remediation_run_id, "attempts": attempt_number,
+                      "last_attempt": datetime.now(timezone.utc).isoformat(), "id": ticket_id})
+
+            # Log audit trail
+            log_audit(
+                ticket_id=ticket_id, action="auto_remediation_triggered", pipeline=pipeline_name,
+                run_id=remediation_run_id, user_name="AI_AUTO_HEAL", user_empid="AUTO_REM_001",
+                details=json.dumps({"attempt": attempt_number, "action": remediation_config["action"], "error_type": error_type})
+            )
+
+            logger.info(f"[AUTO-REM] Successfully triggered for {ticket_id}, remediation_run_id: {remediation_run_id}")
+
+            # Send Slack notification
+            await send_slack_remediation_started(ticket_id, pipeline_name, attempt_number, remediation_config["max_retries"])
+
+            # Broadcast to dashboard
+            try:
+                await manager.broadcast({
+                    "event": "remediation_started",
+                    "ticket_id": ticket_id,
+                    "attempt": attempt_number,
+                    "remediation_run_id": remediation_run_id
+                })
+            except Exception:
+                pass
+
+            # Start monitoring in background
+            asyncio.create_task(monitor_remediation_run(
+                ticket_id, pipeline_name, remediation_run_id,
+                original_run_id, error_type, attempt_number
+            ))
+
+            return {"success": True, "remediation_run_id": remediation_run_id}
+        else:
+            logger.error(f"[AUTO-REM] Logic App returned error: {response.status_code if response else 'No response'}")
+            return {"success": False, "message": f"Logic App error: {response.status_code if response else 'No response'}"}
+
+    except Exception as e:
+        logger.exception(f"[AUTO-REM] Error triggering auto-remediation: {e}")
+        return {"success": False, "message": str(e)}
+
+
+async def monitor_remediation_run(ticket_id: str, pipeline_name: str,
+                                    remediation_run_id: str, original_run_id: str,
+                                    error_type: str, attempt_number: int):
+    """
+    Background task to monitor ADF pipeline re-run status
+    Polls every 30 seconds until completion
+    """
+    logger.info(f"[AUTO-REM] Starting monitoring for remediation run {remediation_run_id}")
+
+    if not all([AZURE_SUBSCRIPTION_ID, AZURE_RESOURCE_GROUP, AZURE_DATA_FACTORY_NAME]):
+        logger.warning("[AUTO-REM] Azure ADF monitoring not configured, skipping monitoring")
+        return
+
+    max_poll_duration = 3600  # 1 hour max
+    poll_interval = 30  # 30 seconds
+    elapsed = 0
+
+    # ADF REST API endpoint
+    api_url = (f"https://management.azure.com/subscriptions/{AZURE_SUBSCRIPTION_ID}"
+               f"/resourceGroups/{AZURE_RESOURCE_GROUP}/providers/Microsoft.DataFactory"
+               f"/factories/{AZURE_DATA_FACTORY_NAME}/pipelineruns/{remediation_run_id}"
+               f"?api-version=2018-06-01")
+
+    # Get Azure access token
+    access_token = await get_azure_access_token()
+    if not access_token:
+        logger.error("[AUTO-REM] Failed to get Azure access token, cannot monitor remediation")
+        return
+
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+
+    while elapsed < max_poll_duration:
+        try:
+            response = requests.get(api_url, headers=headers, timeout=10)
+
+            if response.status_code == 200:
+                run_data = response.json()
+                status = run_data.get("status")  # InProgress, Succeeded, Failed, Cancelled
+
+                logger.info(f"[AUTO-REM] Remediation run {remediation_run_id} status: {status}")
+
+                if status == "Succeeded":
+                    await handle_remediation_success(
+                        ticket_id, pipeline_name, remediation_run_id,
+                        original_run_id, attempt_number
+                    )
+                    return
+
+                elif status in ["Failed", "Cancelled"]:
+                    await handle_remediation_failure(
+                        ticket_id, pipeline_name, remediation_run_id,
+                        original_run_id, error_type, attempt_number,
+                        run_data
+                    )
+                    return
+
+            elif response.status_code == 401:
+                # Token expired, refresh it
+                logger.info("[AUTO-REM] Access token expired, refreshing...")
+                access_token = await get_azure_access_token()
+                if access_token:
+                    headers["Authorization"] = f"Bearer {access_token}"
+            else:
+                logger.error(f"[AUTO-REM] Failed to get pipeline status: {response.status_code}")
+
+        except Exception as e:
+            logger.exception(f"[AUTO-REM] Error monitoring remediation run: {e}")
+
+        await asyncio.sleep(poll_interval)
+        elapsed += poll_interval
+
+    # Timeout reached
+    logger.warning(f"[AUTO-REM] Monitoring timeout reached for {remediation_run_id}")
+    await handle_remediation_timeout(ticket_id, remediation_run_id)
+
+
+async def handle_remediation_success(ticket_id: str, pipeline_name: str,
+                                      remediation_run_id: str, original_run_id: str,
+                                      attempt_number: int):
+    """
+    Called when remediation pipeline run succeeds
+    - Closes ticket
+    - Updates Jira
+    - Sends Slack success notification
+    - Updates dashboard
+    """
+    logger.info(f"[AUTO-REM] ✅ Auto-remediation succeeded for {ticket_id}")
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Update remediation attempt record
+    db_execute('''UPDATE remediation_attempts
+                SET status = :status, completed_at = :completed_at,
+                    duration_seconds = CAST((julianday(:completed_at) - julianday(started_at)) * 86400 AS INTEGER)
+                WHERE ticket_id = :ticket_id AND remediation_run_id = :remediation_run_id''',
+             {"status": "succeeded", "completed_at": now, "ticket_id": ticket_id, "remediation_run_id": remediation_run_id})
+
+    # Get ticket details
+    row = db_query("SELECT * FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+    if not row:
+        logger.error(f"[AUTO-REM] Ticket {ticket_id} not found")
+        return
+
+    start_ts = datetime.fromisoformat(row["timestamp"]) if row.get("timestamp") else datetime.now(timezone.utc)
+    diff = int((datetime.now(timezone.utc) - start_ts).total_seconds())
+    mttr_minutes = round(diff / 60, 2)
+    sla_seconds = int(row.get("sla_seconds", 1800))
+    sla_status = "Met" if diff <= sla_seconds else "Breached"
+
+    # Update ticket status to auto-remediated
+    db_execute('''UPDATE tickets
+                SET status = :status,
+                    remediation_status = :rem_status,
+                    ack_user = :ack_user,
+                    ack_empid = :ack_empid,
+                    ack_ts = :ack_ts,
+                    ack_seconds = :ack_seconds,
+                    sla_status = :sla_status
+                WHERE id = :id''',
+             {"status": "acknowledged", "rem_status": "succeeded", "ack_user": "AI_AUTO_HEAL",
+              "ack_empid": "AUTO_REM_001", "ack_ts": now, "ack_seconds": diff, "sla_status": sla_status, "id": ticket_id})
+
+    # Log audit trail
+    log_audit(
+        ticket_id=ticket_id, action="auto_remediation_success", pipeline=pipeline_name,
+        run_id=remediation_run_id, user_name="AI_AUTO_HEAL", user_empid="AUTO_REM_001",
+        time_taken_seconds=diff, mttr_minutes=mttr_minutes, sla_status=sla_status,
+        rca_summary=(row.get("rca_result", "")[:500] if row.get("rca_result") else ""),
+        finops_team=row.get("finops_team"), finops_owner=row.get("finops_owner"),
+        details=json.dumps({
+            "attempt_number": attempt_number,
+            "original_run_id": original_run_id,
+            "remediation_run_id": remediation_run_id
+        }),
+        itsm_ticket_id=row.get("itsm_ticket_id")
+    )
+
+    # Close Jira ticket (if enabled)
+    if row.get('itsm_ticket_id') and ITSM_TOOL == "jira":
+        try:
+            await close_jira_ticket_auto(row['itsm_ticket_id'], ticket_id, remediation_run_id, attempt_number)
+        except Exception as e:
+            logger.error(f"[AUTO-REM] Failed to close Jira ticket: {e}")
+
+    # Update Slack message
+    if row.get("slack_channel") and row.get("slack_ts"):
+        await update_slack_message_on_remediation_success(
+            row['slack_channel'], row['slack_ts'], ticket_id, pipeline_name,
+            remediation_run_id, attempt_number, mttr_minutes
+        )
+
+    # Broadcast to dashboard
+    try:
+        await manager.broadcast({
+            "event": "status_update",
+            "ticket_id": ticket_id,
+            "new_status": "acknowledged",
+            "user": "AI_AUTO_HEAL",
+            "remediation_success": True
+        })
+    except Exception:
+        pass
+
+    logger.info(f"[AUTO-REM] Auto-remediation success handling completed for {ticket_id}")
+
+
+async def handle_remediation_failure(ticket_id: str, pipeline_name: str,
+                                      remediation_run_id: str, original_run_id: str,
+                                      error_type: str, attempt_number: int,
+                                      run_data: dict):
+    """
+    Called when remediation pipeline run fails
+    - Checks if retries available
+    - Triggers retry or escalates to manual
+    """
+    logger.warning(f"[AUTO-REM] ❌ Auto-remediation attempt {attempt_number} failed for {ticket_id}")
+
+    now = datetime.now(timezone.utc).isoformat()
+    failure_reason = run_data.get("message", "Unknown failure")
+
+    # Update remediation attempt
+    db_execute('''UPDATE remediation_attempts
+                SET status = :status, completed_at = :completed_at, failure_reason = :failure_reason,
+                    duration_seconds = CAST((julianday(:completed_at) - julianday(started_at)) * 86400 AS INTEGER)
+                WHERE ticket_id = :ticket_id AND remediation_run_id = :remediation_run_id''',
+             {"status": "failed", "completed_at": now, "failure_reason": failure_reason,
+              "ticket_id": ticket_id, "remediation_run_id": remediation_run_id})
+
+    # Log audit trail for failed attempt
+    log_audit(
+        ticket_id=ticket_id, action="auto_remediation_attempt_failed", pipeline=pipeline_name,
+        run_id=remediation_run_id, user_name="AI_AUTO_HEAL", user_empid="AUTO_REM_001",
+        details=json.dumps({"attempt": attempt_number, "error_type": error_type, "failure_reason": failure_reason})
+    )
+
+    # Check if we can retry
+    if error_type in REMEDIABLE_ERRORS:
+        max_retries = REMEDIABLE_ERRORS[error_type]["max_retries"]
+
+        if attempt_number < max_retries:
+            # Retry available
+            logger.info(f"[AUTO-REM] Retrying auto-remediation (attempt {attempt_number + 1}/{max_retries})")
+
+            # Send Slack notification about retry
+            await send_slack_remediation_retry(ticket_id, pipeline_name, attempt_number + 1, max_retries)
+
+            # Trigger next attempt
+            await trigger_auto_remediation(
+                ticket_id, pipeline_name, error_type,
+                original_run_id, attempt_number + 1
+            )
+        else:
+            # Max retries exceeded
+            await handle_max_retries_exceeded(ticket_id, pipeline_name, error_type, failure_reason)
+    else:
+        await handle_max_retries_exceeded(ticket_id, pipeline_name, error_type, failure_reason)
+
+
+async def handle_max_retries_exceeded(ticket_id: str, pipeline_name: str,
+                                        error_type: str, failure_reason: str):
+    """
+    Called when all retry attempts exhausted
+    Escalates to manual intervention
+    """
+    logger.error(f"[AUTO-REM] Max retries exceeded for {ticket_id}, escalating to manual intervention")
+
+    now = datetime.now(timezone.utc).isoformat()
+
+    # Update ticket
+    db_execute('''UPDATE tickets
+                SET remediation_status = :status,
+                    status = :ticket_status
+                WHERE id = :id''',
+             {"status": "max_retries_exceeded", "ticket_status": "open", "id": ticket_id})
+
+    # Get ticket details
+    row = db_query("SELECT * FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+    if not row:
+        return
+
+    # Log audit trail
+    log_audit(
+        ticket_id=ticket_id, action="auto_remediation_max_retries_exceeded", pipeline=pipeline_name,
+        user_name="AI_AUTO_HEAL", user_empid="AUTO_REM_001",
+        details=json.dumps({
+            "error_type": error_type,
+            "failure_reason": failure_reason,
+            "attempts": row.get('remediation_attempts', 0)
+        }),
+        itsm_ticket_id=row.get("itsm_ticket_id")
+    )
+
+    # Send Slack escalation alert
+    if row.get("slack_channel") and row.get("slack_ts"):
+        await send_slack_escalation_alert(
+            row['slack_channel'], row['slack_ts'], ticket_id, pipeline_name,
+            error_type, row.get('remediation_attempts', 0), failure_reason
+        )
+
+    # Broadcast to dashboard
+    try:
+        await manager.broadcast({
+            "event": "status_update",
+            "ticket_id": ticket_id,
+            "new_status": "open",
+            "remediation_failed": True,
+            "escalated": True
+        })
+    except Exception:
+        pass
+
+
+async def handle_remediation_timeout(ticket_id: str, remediation_run_id: str):
+    """
+    Called when monitoring timeout is reached
+    """
+    logger.warning(f"[AUTO-REM] Monitoring timeout for {ticket_id}, remediation_run_id: {remediation_run_id}")
+
+    db_execute('''UPDATE remediation_attempts
+                SET status = :status, failure_reason = :failure_reason
+                WHERE ticket_id = :ticket_id AND remediation_run_id = :remediation_run_id''',
+             {"status": "timeout", "failure_reason": "Monitoring timeout reached (1 hour)",
+              "ticket_id": ticket_id, "remediation_run_id": remediation_run_id})
+
+    log_audit(
+        ticket_id=ticket_id, action="auto_remediation_monitoring_timeout",
+        run_id=remediation_run_id, user_name="AI_AUTO_HEAL", user_empid="AUTO_REM_001",
+        details=json.dumps({"remediation_run_id": remediation_run_id, "reason": "Monitoring timeout"})
+    )
+
+
+# Slack notification functions for auto-remediation
+
+async def send_slack_remediation_started(ticket_id: str, pipeline_name: str,
+                                          attempt_number: int, max_retries: int):
+    """Sends Slack notification when auto-remediation starts"""
+    if not SLACK_BOT_TOKEN:
+        return
+
+    row = db_query("SELECT slack_ts, slack_channel FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+    if not row:
+        return
+
+    thread_ts = row.get('slack_ts')
+    channel = row.get('slack_channel') or SLACK_ALERT_CHANNEL
+
+    blocks = [{
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🤖 *Auto-remediation initiated for `{pipeline_name}`*\n"
+                    f"Ticket: {ticket_id}\n"
+                    f"Attempt: {attempt_number}/{max_retries}\n"
+                    f"Action: Re-running pipeline..."
+        }
+    }]
+
+    payload = {
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "blocks": blocks,
+        "text": f"🤖 Auto-remediation attempt {attempt_number} for {pipeline_name}"
+    }
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
+
+    try:
+        requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to send Slack remediation start notification: {e}")
+
+
+async def send_slack_remediation_retry(ticket_id: str, pipeline_name: str,
+                                         attempt_number: int, max_retries: int):
+    """Sends Slack notification for retry attempts"""
+    if not SLACK_BOT_TOKEN:
+        return
+
+    row = db_query("SELECT slack_ts, slack_channel FROM tickets WHERE id = :id", {"id": ticket_id}, one=True)
+    if not row:
+        return
+
+    thread_ts = row.get('slack_ts')
+    channel = row.get('slack_channel') or SLACK_ALERT_CHANNEL
+
+    blocks = [{
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🔄 *Retry attempt {attempt_number}/{max_retries}*\n"
+                    f"Previous attempt failed, retrying auto-remediation for `{pipeline_name}`..."
+        }
+    }]
+
+    payload = {
+        "channel": channel,
+        "thread_ts": thread_ts,
+        "blocks": blocks,
+        "text": f"🔄 Retry attempt {attempt_number} for {pipeline_name}"
+    }
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
+
+    try:
+        requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to send Slack retry notification: {e}")
+
+
+async def update_slack_message_on_remediation_success(channel: str, ts: str,
+                                                        ticket_id: str, pipeline_name: str,
+                                                        remediation_run_id: str, attempt_number: int,
+                                                        mttr_minutes: float):
+    """Updates original Slack alert message with success status"""
+    if not SLACK_BOT_TOKEN:
+        return
+
+    try:
+        # Get original message
+        headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+        result = requests.get(
+            "https://slack.com/api/conversations.history",
+            headers=headers,
+            params={"channel": channel, "latest": ts, "limit": 1, "inclusive": "true"},
+            timeout=10
+        )
+
+        if result.status_code == 200 and result.json().get("ok"):
+            messages = result.json().get("messages", [])
+            original_blocks = messages[0].get("blocks", []) if messages else []
+
+            # Add success header
+            success_blocks = [
+                {
+                    "type": "header",
+                    "text": {"type": "plain_text", "text": "✅ Auto-Remediation Successful"}
+                },
+                {
+                    "type": "section",
+                    "fields": [
+                        {"type": "mrkdwn", "text": f"*Ticket ID:*\n{ticket_id}"},
+                        {"type": "mrkdwn", "text": f"*Pipeline:*\n{pipeline_name}"},
+                        {"type": "mrkdwn", "text": f"*New Run ID:*\n`{remediation_run_id}`"},
+                        {"type": "mrkdwn", "text": f"*Attempt:*\n{attempt_number}"},
+                        {"type": "mrkdwn", "text": f"*MTTR:*\n{mttr_minutes:.1f} minutes"},
+                        {"type": "mrkdwn", "text": f"*Closed By:*\nAI Auto-Heal"}
+                    ]
+                },
+                {"type": "divider"}
+            ]
+
+            # Append original RCA blocks
+            updated_blocks = success_blocks + original_blocks
+
+            payload = {
+                "channel": channel,
+                "ts": ts,
+                "blocks": updated_blocks,
+                "text": f"✅ Auto-remediation successful for {pipeline_name}"
+            }
+
+            requests.post(
+                "https://slack.com/api/chat.update",
+                headers={"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json"},
+                json=payload,
+                timeout=10
+            )
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to update Slack message: {e}")
+
+
+async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
+                                        pipeline_name: str, error_type: str,
+                                        attempts: int, failure_reason: str):
+    """Sends Slack alert when auto-remediation fails after max retries"""
+    if not SLACK_BOT_TOKEN:
+        return
+
+    blocks = [
+        {
+            "type": "header",
+            "text": {"type": "plain_text", "text": "⚠️ Auto-Remediation Failed - Manual Intervention Required"}
+        },
+        {
+            "type": "section",
+            "fields": [
+                {"type": "mrkdwn", "text": f"*Ticket ID:*\n{ticket_id}"},
+                {"type": "mrkdwn", "text": f"*Pipeline:*\n{pipeline_name}"},
+                {"type": "mrkdwn", "text": f"*Error Type:*\n{error_type}"},
+                {"type": "mrkdwn", "text": f"*Attempts:*\n{attempts}"},
+                {"type": "mrkdwn", "text": f"*Last Failure:*\n{failure_reason[:200]}"}
+            ]
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🔴 *Action Required:* All automated remediation attempts have been exhausted. "
+                        "Please investigate and resolve manually."
+            }
+        }
+    ]
+
+    dash_url = f"{PUBLIC_BASE_URL.rstrip('/')}/dashboard?ticket={ticket_id}"
+    blocks.append({
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": "View in Dashboard"},
+            "url": dash_url,
+            "style": "danger"
+        }]
+    })
+
+    payload = {
+        "channel": channel,
+        "thread_ts": ts,
+        "blocks": blocks,
+        "text": f"⚠️ Auto-remediation failed for {pipeline_name} after {attempts} attempts"
+    }
+    headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}", "Content-type": "application/json; charset=utf-8"}
+
+    try:
+        requests.post("https://slack.com/api/chat.postMessage", headers=headers, json=payload, timeout=10)
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to send Slack escalation alert: {e}")
+
+
+async def close_jira_ticket_auto(jira_ticket_id: str, ticket_id: str,
+                                   remediation_run_id: str, attempt_number: int):
+    """Automatically closes Jira ticket with remediation details"""
+    if not all([JIRA_DOMAIN, JIRA_USER_EMAIL, JIRA_API_TOKEN]):
+        logger.warning("[AUTO-REM] Jira not configured, skipping auto-close")
+        return
+
+    # Add comment with remediation details
+    comment_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/comment"
+    comment_payload = {
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [{
+                "type": "panel",
+                "attrs": {"panelType": "success"},
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "✅ Auto-Remediation Successful",
+                        "marks": [{"type": "strong"}]
+                    }]
+                }, {
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": f"Ticket ID: {ticket_id}\n"
+                                f"Remediation Run ID: {remediation_run_id}\n"
+                                f"Attempt Number: {attempt_number}\n"
+                                f"Action: Pipeline re-run completed successfully\n"
+                                f"Closed By: AI Auto-Heal System"
+                    }]
+                }]
+            }]
+        }
+    }
+
+    try:
+        requests.post(
+            comment_url,
+            auth=(JIRA_USER_EMAIL, JIRA_API_TOKEN),
+            headers={"Content-Type": "application/json"},
+            json=comment_payload,
+            timeout=10
+        )
+
+        # Transition to Done
+        transition_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/transitions"
+        transition_payload = {"transition": {"id": "31"}}  # May need adjustment
+        requests.post(
+            transition_url,
+            auth=(JIRA_USER_EMAIL, JIRA_API_TOKEN),
+            headers={"Content-Type": "application/json"},
+            json=transition_payload,
+            timeout=10
+        )
+
+        logger.info(f"[AUTO-REM] Jira ticket {jira_ticket_id} auto-closed")
+
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to auto-close Jira ticket: {e}")
 
 # --- SIMPLIFIED: Ticket State Function ---
 async def perform_close_from_jira(ticket_id: str, row: dict, user_name: str, user_empid: str, details: str):
@@ -1054,8 +2039,25 @@ async def azure_monitor(request: Request):
     # Auto-Remediation (if enabled)
     if AUTO_REMEDIATION_ENABLED and rca.get("auto_heal_possible"):
         error_type = rca.get("error_type")
-        logger.info(f"Auto-remediation candidate: {error_type} (implementation in AUTO_REMEDIATION_GUIDE.md)")
-        # Implementation code in AUTO_REMEDIATION_GUIDE.md
+        if error_type in REMEDIABLE_ERRORS:
+            logger.info(f"[AUTO-REM] Eligible for auto-remediation: {error_type} for ticket {tid}")
+            try:
+                # Trigger auto-remediation in background
+                asyncio.create_task(trigger_auto_remediation(
+                    ticket_id=tid,
+                    pipeline_name=pipeline,
+                    error_type=error_type,
+                    original_run_id=runid or "N/A",
+                    attempt_number=1
+                ))
+                log_audit(ticket_id=tid, action="auto_remediation_eligible", pipeline=pipeline, run_id=runid,
+                         details=f"Auto-remediation triggered for error_type: {error_type}")
+            except Exception as e:
+                logger.error(f"[AUTO-REM] Failed to trigger auto-remediation: {e}")
+                log_audit(ticket_id=tid, action="auto_remediation_trigger_failed", pipeline=pipeline, run_id=runid,
+                         details=f"Error: {str(e)}")
+        else:
+            logger.info(f"[AUTO-REM] Error type {error_type} not in REMEDIABLE_ERRORS list")
 
     logger.info(f"Successfully created ticket {tid} for ADF alert")
 
