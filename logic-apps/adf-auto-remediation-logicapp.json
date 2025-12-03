@@ -1,0 +1,263 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "adf-auto-remediation",
+      "metadata": {
+        "description": "Name of the Logic App for ADF auto-remediation"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for the Logic App"
+      }
+    },
+    "subscriptionId": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure subscription ID where ADF is located"
+      }
+    },
+    "resourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource group name where ADF is located"
+      }
+    },
+    "dataFactoryName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the Azure Data Factory"
+      }
+    }
+  },
+  "variables": {
+    "adfApiVersion": "2018-06-01"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2017-07-01",
+      "name": "[parameters('logicAppName')]",
+      "location": "[parameters('location')]",
+      "identity": {
+        "type": "SystemAssigned"
+      },
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {},
+          "triggers": {
+            "manual": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pipeline_name": {
+                      "type": "string"
+                    },
+                    "ticket_id": {
+                      "type": "string"
+                    },
+                    "error_type": {
+                      "type": "string"
+                    },
+                    "original_run_id": {
+                      "type": "string"
+                    },
+                    "retry_attempt": {
+                      "type": "integer"
+                    },
+                    "max_retries": {
+                      "type": "integer"
+                    },
+                    "remediation_action": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "pipeline_name",
+                    "ticket_id",
+                    "error_type",
+                    "remediation_action"
+                  ]
+                }
+              }
+            }
+          },
+          "actions": {
+            "Parse_Request": {
+              "runAfter": {},
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@triggerBody()",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "pipeline_name": {
+                      "type": "string"
+                    },
+                    "ticket_id": {
+                      "type": "string"
+                    },
+                    "error_type": {
+                      "type": "string"
+                    },
+                    "original_run_id": {
+                      "type": "string"
+                    },
+                    "retry_attempt": {
+                      "type": "integer"
+                    },
+                    "remediation_action": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "Log_Remediation_Start": {
+              "runAfter": {
+                "Parse_Request": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Compose",
+              "inputs": {
+                "message": "Starting ADF pipeline remediation",
+                "pipeline_name": "@{body('Parse_Request')?['pipeline_name']}",
+                "ticket_id": "@{body('Parse_Request')?['ticket_id']}",
+                "error_type": "@{body('Parse_Request')?['error_type']}",
+                "retry_attempt": "@{body('Parse_Request')?['retry_attempt']}"
+              }
+            },
+            "Retry_ADF_Pipeline": {
+              "runAfter": {
+                "Log_Remediation_Start": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Http",
+              "inputs": {
+                "method": "POST",
+                "uri": "[concat('https://management.azure.com/subscriptions/', parameters('subscriptionId'), '/resourceGroups/', parameters('resourceGroupName'), '/providers/Microsoft.DataFactory/factories/', parameters('dataFactoryName'), '/pipelines/', '@{body(''Parse_Request'')?[''pipeline_name'']}', '/createRun?api-version=', variables('adfApiVersion'))]",
+                "authentication": {
+                  "type": "ManagedServiceIdentity"
+                },
+                "body": {
+                  "referencePipelineRunId": "@{body('Parse_Request')?['original_run_id']}",
+                  "parameters": {}
+                }
+              }
+            },
+            "Check_Pipeline_Trigger_Success": {
+              "runAfter": {
+                "Retry_ADF_Pipeline": [
+                  "Succeeded",
+                  "Failed"
+                ]
+              },
+              "type": "If",
+              "expression": {
+                "and": [
+                  {
+                    "equals": [
+                      "@outputs('Retry_ADF_Pipeline')['statusCode']",
+                      200
+                    ]
+                  }
+                ]
+              },
+              "actions": {
+                "Parse_Run_ID": {
+                  "runAfter": {},
+                  "type": "ParseJson",
+                  "inputs": {
+                    "content": "@body('Retry_ADF_Pipeline')",
+                    "schema": {
+                      "type": "object",
+                      "properties": {
+                        "runId": {
+                          "type": "string"
+                        }
+                      }
+                    }
+                  }
+                },
+                "Success_Response": {
+                  "runAfter": {
+                    "Parse_Run_ID": [
+                      "Succeeded"
+                    ]
+                  },
+                  "type": "Response",
+                  "kind": "Http",
+                  "inputs": {
+                    "statusCode": 200,
+                    "body": {
+                      "status": "success",
+                      "run_id": "@{body('Parse_Run_ID')?['runId']}",
+                      "message": "ADF pipeline re-run triggered successfully",
+                      "pipeline_name": "@{body('Parse_Request')?['pipeline_name']}",
+                      "ticket_id": "@{body('Parse_Request')?['ticket_id']}",
+                      "retry_attempt": "@{body('Parse_Request')?['retry_attempt']}"
+                    }
+                  }
+                }
+              },
+              "else": {
+                "actions": {
+                  "Failure_Response": {
+                    "runAfter": {},
+                    "type": "Response",
+                    "kind": "Http",
+                    "inputs": {
+                      "statusCode": 500,
+                      "body": {
+                        "status": "failed",
+                        "message": "Failed to trigger ADF pipeline re-run",
+                        "error": "@{body('Retry_ADF_Pipeline')}",
+                        "pipeline_name": "@{body('Parse_Request')?['pipeline_name']}",
+                        "ticket_id": "@{body('Parse_Request')?['ticket_id']}"
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {}
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppUrl": {
+      "type": "string",
+      "value": "[listCallbackURL(concat(resourceId('Microsoft.Logic/workflows', parameters('logicAppName')), '/triggers/manual'), '2017-07-01').value]"
+    },
+    "logicAppName": {
+      "type": "string",
+      "value": "[parameters('logicAppName')]"
+    },
+    "principalId": {
+      "type": "string",
+      "value": "[reference(resourceId('Microsoft.Logic/workflows', parameters('logicAppName')), '2017-07-01', 'Full').identity.principalId]",
+      "metadata": {
+        "description": "Managed Identity Principal ID - Grant this Contributor role on ADF"
+      }
+    }
+  }
+}

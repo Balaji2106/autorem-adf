@@ -1,0 +1,452 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "logicAppName": {
+      "type": "string",
+      "defaultValue": "databricks-auto-remediation",
+      "metadata": {
+        "description": "Name of the Logic App for Databricks auto-remediation"
+      }
+    },
+    "location": {
+      "type": "string",
+      "defaultValue": "[resourceGroup().location]",
+      "metadata": {
+        "description": "Location for the Logic App"
+      }
+    },
+    "databricksWorkspaceUrl": {
+      "type": "string",
+      "metadata": {
+        "description": "Databricks workspace URL (e.g., https://adb-1234567890.azuredatabricks.net)"
+      }
+    },
+    "databricksToken": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Databricks Personal Access Token (PAT) - Store in Key Vault for production"
+      }
+    }
+  },
+  "variables": {
+    "databricksJobsApiVersion": "2.1"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Logic/workflows",
+      "apiVersion": "2017-07-01",
+      "name": "[parameters('logicAppName')]",
+      "location": "[parameters('location')]",
+      "properties": {
+        "state": "Enabled",
+        "definition": {
+          "$schema": "https://schema.management.azure.com/providers/Microsoft.Logic/schemas/2016-06-01/workflowdefinition.json#",
+          "contentVersion": "1.0.0.0",
+          "parameters": {
+            "databricksWorkspaceUrl": {
+              "type": "string",
+              "defaultValue": "[parameters('databricksWorkspaceUrl')]"
+            },
+            "databricksToken": {
+              "type": "securestring",
+              "defaultValue": "[parameters('databricksToken')]"
+            }
+          },
+          "triggers": {
+            "manual": {
+              "type": "Request",
+              "kind": "Http",
+              "inputs": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "job_name": {
+                      "type": "string"
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "cluster_id": {
+                      "type": "string"
+                    },
+                    "ticket_id": {
+                      "type": "string"
+                    },
+                    "error_type": {
+                      "type": "string"
+                    },
+                    "original_run_id": {
+                      "type": "string"
+                    },
+                    "retry_attempt": {
+                      "type": "integer"
+                    },
+                    "max_retries": {
+                      "type": "integer"
+                    },
+                    "remediation_action": {
+                      "type": "string"
+                    },
+                    "timestamp": {
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "ticket_id",
+                    "error_type",
+                    "remediation_action"
+                  ]
+                }
+              }
+            }
+          },
+          "actions": {
+            "Parse_Request": {
+              "runAfter": {},
+              "type": "ParseJson",
+              "inputs": {
+                "content": "@triggerBody()",
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "job_name": {
+                      "type": "string"
+                    },
+                    "job_id": {
+                      "type": "string"
+                    },
+                    "cluster_id": {
+                      "type": "string"
+                    },
+                    "ticket_id": {
+                      "type": "string"
+                    },
+                    "error_type": {
+                      "type": "string"
+                    },
+                    "remediation_action": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            },
+            "Check_Remediation_Action": {
+              "runAfter": {
+                "Parse_Request": [
+                  "Succeeded"
+                ]
+              },
+              "type": "Switch",
+              "expression": "@body('Parse_Request')?['remediation_action']",
+              "cases": {
+                "retry_job": {
+                  "case": "retry_job",
+                  "actions": {
+                    "Get_Job_Details": {
+                      "runAfter": {},
+                      "type": "Http",
+                      "inputs": {
+                        "method": "GET",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.1/jobs/get?job_id=@{body('Parse_Request')?['job_id']}",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        }
+                      }
+                    },
+                    "Retry_Databricks_Job": {
+                      "runAfter": {
+                        "Get_Job_Details": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.1/jobs/run-now",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "job_id": "@{body('Parse_Request')?['job_id']}"
+                        }
+                      }
+                    },
+                    "Parse_Job_Run_Response": {
+                      "runAfter": {
+                        "Retry_Databricks_Job": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "ParseJson",
+                      "inputs": {
+                        "content": "@body('Retry_Databricks_Job')",
+                        "schema": {
+                          "type": "object",
+                          "properties": {
+                            "run_id": {
+                              "type": "integer"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "Job_Retry_Success_Response": {
+                      "runAfter": {
+                        "Parse_Job_Run_Response": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Response",
+                      "kind": "Http",
+                      "inputs": {
+                        "statusCode": 200,
+                        "body": {
+                          "status": "success",
+                          "run_id": "@{body('Parse_Job_Run_Response')?['run_id']}",
+                          "message": "Databricks job re-run triggered successfully",
+                          "job_id": "@{body('Parse_Request')?['job_id']}",
+                          "job_name": "@{body('Parse_Request')?['job_name']}",
+                          "ticket_id": "@{body('Parse_Request')?['ticket_id']}",
+                          "remediation_action": "retry_job"
+                        }
+                      }
+                    }
+                  }
+                },
+                "restart_cluster": {
+                  "case": "restart_cluster",
+                  "actions": {
+                    "Restart_Databricks_Cluster": {
+                      "runAfter": {},
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.0/clusters/restart",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "cluster_id": "@{body('Parse_Request')?['cluster_id']}"
+                        }
+                      }
+                    },
+                    "Wait_For_Cluster_Start": {
+                      "runAfter": {
+                        "Restart_Databricks_Cluster": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Wait",
+                      "inputs": {
+                        "interval": {
+                          "count": 30,
+                          "unit": "Second"
+                        }
+                      }
+                    },
+                    "Get_Cluster_Status": {
+                      "runAfter": {
+                        "Wait_For_Cluster_Start": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "GET",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.0/clusters/get?cluster_id=@{body('Parse_Request')?['cluster_id']}",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        }
+                      }
+                    },
+                    "Parse_Cluster_Status": {
+                      "runAfter": {
+                        "Get_Cluster_Status": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "ParseJson",
+                      "inputs": {
+                        "content": "@body('Get_Cluster_Status')",
+                        "schema": {
+                          "type": "object",
+                          "properties": {
+                            "state": {
+                              "type": "string"
+                            },
+                            "cluster_id": {
+                              "type": "string"
+                            }
+                          }
+                        }
+                      }
+                    },
+                    "Cluster_Restart_Success_Response": {
+                      "runAfter": {
+                        "Parse_Cluster_Status": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Response",
+                      "kind": "Http",
+                      "inputs": {
+                        "statusCode": 200,
+                        "body": {
+                          "status": "success",
+                          "run_id": "@{body('Parse_Request')?['cluster_id']}",
+                          "message": "Databricks cluster restart initiated",
+                          "cluster_id": "@{body('Parse_Request')?['cluster_id']}",
+                          "cluster_state": "@{body('Parse_Cluster_Status')?['state']}",
+                          "ticket_id": "@{body('Parse_Request')?['ticket_id']}",
+                          "remediation_action": "restart_cluster"
+                        }
+                      }
+                    }
+                  }
+                },
+                "reinstall_libraries": {
+                  "case": "reinstall_libraries",
+                  "actions": {
+                    "Get_Cluster_Libraries": {
+                      "runAfter": {},
+                      "type": "Http",
+                      "inputs": {
+                        "method": "GET",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.0/libraries/cluster-status?cluster_id=@{body('Parse_Request')?['cluster_id']}",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        }
+                      }
+                    },
+                    "Uninstall_All_Libraries": {
+                      "runAfter": {
+                        "Get_Cluster_Libraries": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.0/libraries/uninstall",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "cluster_id": "@{body('Parse_Request')?['cluster_id']}",
+                          "libraries": "@body('Get_Cluster_Libraries')?['library_statuses']"
+                        }
+                      }
+                    },
+                    "Wait_For_Uninstall": {
+                      "runAfter": {
+                        "Uninstall_All_Libraries": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Wait",
+                      "inputs": {
+                        "interval": {
+                          "count": 10,
+                          "unit": "Second"
+                        }
+                      }
+                    },
+                    "Reinstall_Libraries": {
+                      "runAfter": {
+                        "Wait_For_Uninstall": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Http",
+                      "inputs": {
+                        "method": "POST",
+                        "uri": "@{parameters('databricksWorkspaceUrl')}/api/2.0/libraries/install",
+                        "headers": {
+                          "Authorization": "Bearer @{parameters('databricksToken')}",
+                          "Content-Type": "application/json"
+                        },
+                        "body": {
+                          "cluster_id": "@{body('Parse_Request')?['cluster_id']}",
+                          "libraries": "@body('Get_Cluster_Libraries')?['library_statuses']"
+                        }
+                      }
+                    },
+                    "Library_Reinstall_Success_Response": {
+                      "runAfter": {
+                        "Reinstall_Libraries": [
+                          "Succeeded"
+                        ]
+                      },
+                      "type": "Response",
+                      "kind": "Http",
+                      "inputs": {
+                        "statusCode": 200,
+                        "body": {
+                          "status": "success",
+                          "run_id": "@{body('Parse_Request')?['cluster_id']}",
+                          "message": "Databricks libraries reinstalled successfully",
+                          "cluster_id": "@{body('Parse_Request')?['cluster_id']}",
+                          "ticket_id": "@{body('Parse_Request')?['ticket_id']}",
+                          "remediation_action": "reinstall_libraries"
+                        }
+                      }
+                    }
+                  }
+                }
+              },
+              "default": {
+                "actions": {
+                  "Unsupported_Action_Response": {
+                    "runAfter": {},
+                    "type": "Response",
+                    "kind": "Http",
+                    "inputs": {
+                      "statusCode": 400,
+                      "body": {
+                        "status": "failed",
+                        "message": "Unsupported remediation action",
+                        "remediation_action": "@{body('Parse_Request')?['remediation_action']}",
+                        "supported_actions": [
+                          "retry_job",
+                          "restart_cluster",
+                          "reinstall_libraries"
+                        ]
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "outputs": {}
+        },
+        "parameters": {
+          "databricksWorkspaceUrl": {
+            "value": "[parameters('databricksWorkspaceUrl')]"
+          },
+          "databricksToken": {
+            "value": "[parameters('databricksToken')]"
+          }
+        }
+      }
+    }
+  ],
+  "outputs": {
+    "logicAppUrl": {
+      "type": "string",
+      "value": "[listCallbackURL(concat(resourceId('Microsoft.Logic/workflows', parameters('logicAppName')), '/triggers/manual'), '2017-07-01').value]"
+    },
+    "logicAppName": {
+      "type": "string",
+      "value": "[parameters('logicAppName')]"
+    }
+  }
+}
