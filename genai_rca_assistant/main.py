@@ -1437,14 +1437,23 @@ async def handle_max_retries_exceeded(ticket_id: str, pipeline_name: str,
             error_type, row.get('remediation_attempts', 0), failure_reason
         )
 
+    # Update Jira ticket with failure details
+    if row.get("itsm_ticket_id"):
+        await update_jira_ticket_max_retries_exceeded(
+            row['itsm_ticket_id'], ticket_id, pipeline_name,
+            error_type, row.get('remediation_attempts', 0), failure_reason
+        )
+
     # Broadcast to dashboard
     try:
         await manager.broadcast({
             "event": "status_update",
             "ticket_id": ticket_id,
             "new_status": "open",
+            "remediation_status": "max_retries_exceeded",
             "remediation_failed": True,
-            "escalated": True
+            "escalated": True,
+            "message": f"Auto-remediation applied but not solved after {row.get('remediation_attempts', 0)} attempts"
         })
     except Exception:
         pass
@@ -1617,7 +1626,7 @@ async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
     blocks = [
         {
             "type": "header",
-            "text": {"type": "plain_text", "text": "⚠️ Auto-Remediation Failed - Manual Intervention Required"}
+            "text": {"type": "plain_text", "text": "🔴 Auto-Remediation Applied But Not Solved"}
         },
         {
             "type": "section",
@@ -1625,16 +1634,17 @@ async def send_slack_escalation_alert(channel: str, ts: str, ticket_id: str,
                 {"type": "mrkdwn", "text": f"*Ticket ID:*\n{ticket_id}"},
                 {"type": "mrkdwn", "text": f"*Pipeline:*\n{pipeline_name}"},
                 {"type": "mrkdwn", "text": f"*Error Type:*\n{error_type}"},
-                {"type": "mrkdwn", "text": f"*Attempts:*\n{attempts}"},
-                {"type": "mrkdwn", "text": f"*Last Failure:*\n{failure_reason[:200]}"}
+                {"type": "mrkdwn", "text": f"*Remediation Attempts:*\n{attempts} (Max retries exceeded)"},
+                {"type": "mrkdwn", "text": f"*Failure Reason:*\n{failure_reason[:200]}"}
             ]
         },
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "🔴 *Action Required:* All automated remediation attempts have been exhausted. "
-                        "Please investigate and resolve manually."
+                "text": "⚠️ *Status:* Auto-remediation was applied but did not resolve the issue after "
+                        f"{attempts} attempts. Manual intervention is now required.\n\n"
+                        "🔴 *Action Required:* Please investigate and resolve manually."
             }
         }
     ]
@@ -1726,6 +1736,62 @@ async def close_jira_ticket_auto(jira_ticket_id: str, ticket_id: str,
 
     except Exception as e:
         logger.error(f"[AUTO-REM] Failed to auto-close Jira ticket: {e}")
+
+
+async def update_jira_ticket_max_retries_exceeded(jira_ticket_id: str, ticket_id: str,
+                                                   pipeline_name: str, error_type: str,
+                                                   attempts: int, failure_reason: str):
+    """Updates Jira ticket when auto-remediation fails after max retries"""
+    if not all([JIRA_DOMAIN, JIRA_USER_EMAIL, JIRA_API_TOKEN]):
+        logger.warning("[AUTO-REM] Jira not configured, skipping update")
+        return
+
+    # Add comment with remediation failure details
+    comment_url = f"{JIRA_DOMAIN}/rest/api/3/issue/{jira_ticket_id}/comment"
+    comment_payload = {
+        "body": {
+            "type": "doc",
+            "version": 1,
+            "content": [{
+                "type": "panel",
+                "attrs": {"panelType": "warning"},
+                "content": [{
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": "🔴 Auto-Remediation Applied But Not Solved",
+                        "marks": [{"type": "strong"}]
+                    }]
+                }, {
+                    "type": "paragraph",
+                    "content": [{
+                        "type": "text",
+                        "text": f"Ticket ID: {ticket_id}\n"
+                                f"Pipeline: {pipeline_name}\n"
+                                f"Error Type: {error_type}\n"
+                                f"Total Attempts: {attempts}\n"
+                                f"Status: Max retries exceeded\n"
+                                f"Last Failure Reason: {failure_reason}\n\n"
+                                f"⚠️ Auto-remediation was applied but did not resolve the issue. "
+                                f"Manual intervention is required."
+                    }]
+                }]
+            }]
+        }
+    }
+
+    try:
+        requests.post(
+            comment_url,
+            auth=(JIRA_USER_EMAIL, JIRA_API_TOKEN),
+            headers={"Content-Type": "application/json"},
+            json=comment_payload,
+            timeout=10
+        )
+        logger.info(f"[AUTO-REM] Updated Jira ticket {jira_ticket_id} with max retries exceeded status")
+    except Exception as e:
+        logger.error(f"[AUTO-REM] Failed to update Jira ticket: {e}")
+
 
 # --- SIMPLIFIED: Ticket State Function ---
 async def perform_close_from_jira(ticket_id: str, row: dict, user_name: str, user_empid: str, details: str):
@@ -2041,21 +2107,67 @@ async def azure_monitor(request: Request):
         error_type = rca.get("error_type")
         if error_type in REMEDIABLE_ERRORS:
             logger.info(f"[AUTO-REM] Eligible for auto-remediation: {error_type} for ticket {tid}")
-            try:
-                # Trigger auto-remediation in background
-                asyncio.create_task(trigger_auto_remediation(
-                    ticket_id=tid,
-                    pipeline_name=pipeline,
-                    error_type=error_type,
-                    original_run_id=runid or "N/A",
-                    attempt_number=1
-                ))
-                log_audit(ticket_id=tid, action="auto_remediation_eligible", pipeline=pipeline, run_id=runid,
-                         details=f"Auto-remediation triggered for error_type: {error_type}")
-            except Exception as e:
-                logger.error(f"[AUTO-REM] Failed to trigger auto-remediation: {e}")
-                log_audit(ticket_id=tid, action="auto_remediation_trigger_failed", pipeline=pipeline, run_id=runid,
-                         details=f"Error: {str(e)}")
+
+            # Check for existing ongoing remediation for same pipeline+error to prevent spam
+            existing_remediation = db_query("""
+                SELECT id, remediation_status, remediation_attempts, remediation_last_attempt_at
+                FROM tickets
+                WHERE pipeline = :pipeline
+                    AND error_type = :error_type
+                    AND status IN ('open', 'pending')
+                    AND remediation_status IN ('in_progress', 'max_retries_exceeded')
+                ORDER BY timestamp DESC
+                LIMIT 1
+            """, {"pipeline": pipeline, "error_type": error_type}, one=True)
+
+            if existing_remediation:
+                existing_ticket_id = existing_remediation.get('id')
+                existing_status = existing_remediation.get('remediation_status')
+                existing_attempts = existing_remediation.get('remediation_attempts', 0)
+                max_retries = REMEDIABLE_ERRORS[error_type]["max_retries"]
+
+                if existing_status == 'max_retries_exceeded':
+                    logger.warning(f"[AUTO-REM] Skipping remediation - existing ticket {existing_ticket_id} already exceeded max retries ({max_retries})")
+                    log_audit(ticket_id=tid, action="auto_remediation_skipped_max_retries_exceeded",
+                             pipeline=pipeline, run_id=runid,
+                             details=f"Linked to existing ticket {existing_ticket_id} which already exceeded max retries. No new remediation triggered to prevent spam.")
+                elif existing_status == 'in_progress':
+                    logger.info(f"[AUTO-REM] Skipping remediation - ongoing remediation exists for ticket {existing_ticket_id} (attempt {existing_attempts}/{max_retries})")
+                    log_audit(ticket_id=tid, action="auto_remediation_skipped_in_progress",
+                             pipeline=pipeline, run_id=runid,
+                             details=f"Linked to existing ticket {existing_ticket_id} with ongoing remediation (attempt {existing_attempts}/{max_retries}). No new remediation triggered to prevent spam.")
+                else:
+                    # Trigger auto-remediation only if no existing ongoing remediation
+                    try:
+                        asyncio.create_task(trigger_auto_remediation(
+                            ticket_id=tid,
+                            pipeline_name=pipeline,
+                            error_type=error_type,
+                            original_run_id=runid or "N/A",
+                            attempt_number=1
+                        ))
+                        log_audit(ticket_id=tid, action="auto_remediation_eligible", pipeline=pipeline, run_id=runid,
+                                 details=f"Auto-remediation triggered for error_type: {error_type}")
+                    except Exception as e:
+                        logger.error(f"[AUTO-REM] Failed to trigger auto-remediation: {e}")
+                        log_audit(ticket_id=tid, action="auto_remediation_trigger_failed", pipeline=pipeline, run_id=runid,
+                                 details=f"Error: {str(e)}")
+            else:
+                # No existing remediation found, trigger new one
+                try:
+                    asyncio.create_task(trigger_auto_remediation(
+                        ticket_id=tid,
+                        pipeline_name=pipeline,
+                        error_type=error_type,
+                        original_run_id=runid or "N/A",
+                        attempt_number=1
+                    ))
+                    log_audit(ticket_id=tid, action="auto_remediation_eligible", pipeline=pipeline, run_id=runid,
+                             details=f"Auto-remediation triggered for error_type: {error_type}")
+                except Exception as e:
+                    logger.error(f"[AUTO-REM] Failed to trigger auto-remediation: {e}")
+                    log_audit(ticket_id=tid, action="auto_remediation_trigger_failed", pipeline=pipeline, run_id=runid,
+                             details=f"Error: {str(e)}")
         else:
             logger.info(f"[AUTO-REM] Error type {error_type} not in REMEDIABLE_ERRORS list")
 
