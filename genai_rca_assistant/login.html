@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Login - AIOps RCA Console</title>
+<link rel="icon" href="https://cdn-icons-png.flaticon.com/512/3039/3039387.png" />
+<style>
+  body{
+    font-family:Segoe UI,Roboto,Arial;
+    background:#0d1117;
+    color:#e6eef6;
+    margin:0;
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    min-height:100vh;
+  }
+  .login-container{
+    background:#161b22;
+    border:1px solid #30363d;
+    border-radius:12px;
+    padding:40px;
+    width:100%;
+    max-width:420px;
+    box-shadow:0 8px 32px rgba(0,0,0,0.5);
+  }
+  .logo{
+    text-align:center;
+    margin-bottom:30px;
+  }
+  .logo h1{
+    color:#58a6ff;
+    font-size:2em;
+    margin:0 0 10px 0;
+    text-shadow:0 0 10px #58a6ff80;
+  }
+  .logo p{
+    color:#9aa6b2;
+    margin:0;
+    font-size:14px;
+  }
+  .tabs{
+    display:flex;
+    gap:10px;
+    margin-bottom:30px;
+    border-bottom:1px solid #30363d;
+  }
+  .tab{
+    flex:1;
+    padding:12px;
+    text-align:center;
+    cursor:pointer;
+    color:#9aa6b2;
+    background:transparent;
+    border:none;
+    border-bottom:2px solid transparent;
+    transition:all 0.2s;
+  }
+  .tab:hover{
+    color:#e6eef6;
+  }
+  .tab.active{
+    color:#58a6ff;
+    border-bottom-color:#58a6ff;
+  }
+  .form-group{
+    margin-bottom:20px;
+  }
+  .form-group label{
+    display:block;
+    margin-bottom:8px;
+    color:#9aa6b2;
+    font-size:14px;
+  }
+  .form-group input{
+    width:100%;
+    padding:12px;
+    background:#0d1117;
+    border:1px solid #30363d;
+    border-radius:6px;
+    color:#e6eef6;
+    font-size:14px;
+    box-sizing:border-box;
+  }
+  .form-group input:focus{
+    outline:none;
+    border-color:#58a6ff;
+  }
+  .btn{
+    width:100%;
+    padding:12px;
+    background:#238636;
+    color:#fff;
+    border:none;
+    border-radius:6px;
+    cursor:pointer;
+    font-weight:600;
+    font-size:14px;
+    transition:background 0.2s;
+  }
+  .btn:hover{
+    background:#2ea043;
+  }
+  .btn:disabled{
+    background:#30363d;
+    cursor:not-allowed;
+  }
+  .error{
+    background:#f85149;
+    color:#fff;
+    padding:12px;
+    border-radius:6px;
+    margin-bottom:20px;
+    font-size:14px;
+    display:none;
+  }
+  .success{
+    background:#2ea043;
+    color:#fff;
+    padding:12px;
+    border-radius:6px;
+    margin-bottom:20px;
+    font-size:14px;
+    display:none;
+  }
+  .form-container{
+    display:none;
+  }
+  .form-container.active{
+    display:block;
+  }
+  .info{
+    margin-top:20px;
+    padding:12px;
+    background:#1f2937;
+    border-left:3px solid:#fbbf24;
+    border-radius:4px;
+    font-size:13px;
+    color:#9aa6b2;
+  }
+</style>
+</head>
+<body>
+<div class="login-container">
+  <div class="logo">
+    <h1>AIOps RCA</h1>
+    <p>Root Cause Analysis Console</p>
+  </div>
+  
+  <div class="tabs">
+    <button class="tab active" onclick="switchAuthTab('login')">Login</button>
+    <button class="tab" onclick="switchAuthTab('register')">Register</button>
+  </div>
+  
+  <div id="error-message" class="error"></div>
+  <div id="success-message" class="success"></div>
+  
+  <!-- LOGIN FORM -->
+  <div id="login-form" class="form-container active">
+    <form onsubmit="handleLogin(event)">
+      <div class="form-group">
+        <label for="login-email">Email</label>
+        <input type="email" id="login-email" placeholder="user@sigmoidanalytics.com" required />
+      </div>
+      <div class="form-group">
+        <label for="login-password">Password</label>
+        <input type="password" id="login-password" placeholder="Enter your password" required />
+      </div>
+      <button type="submit" class="btn" id="login-btn">Login</button>
+    </form>
+  </div>
+  
+  <!-- REGISTER FORM -->
+  <div id="register-form" class="form-container">
+    <form onsubmit="handleRegister(event)">
+      <div class="form-group">
+        <label for="register-name">Full Name (Optional)</label>
+        <input type="text" id="register-name" placeholder="John Doe" />
+      </div>
+      <div class="form-group">
+        <label for="register-email">Email *</label>
+        <input type="email" id="register-email" placeholder="user@sigmoidanalytics.com" required />
+      </div>
+      <div class="form-group">
+        <label for="register-password">Password *</label>
+        <input type="password" id="register-password" placeholder="Minimum 8 characters" required minlength="8" />
+      </div>
+      <div class="form-group">
+        <label for="register-confirm">Confirm Password *</label>
+        <input type="password" id="register-confirm" placeholder="Re-enter password" required minlength="8" />
+      </div>
+      <button type="submit" class="btn" id="register-btn">Register</button>
+    </form>
+    
+    <div class="info">
+      INFO: Only @sigmoidanalytics.com email addresses are allowed. Password must be at least 8 characters.
+    </div>
+  </div>
+</div>
+
+<script>
+function switchAuthTab(tab) {
+  const loginTab = document.querySelectorAll('.tab')[0];
+  const registerTab = document.querySelectorAll('.tab')[1];
+  const loginForm = document.getElementById('login-form');
+  const registerForm = document.getElementById('register-form');
+  
+  hideMessages();
+  
+  if (tab === 'login') {
+    loginTab.classList.add('active');
+    registerTab.classList.remove('active');
+    loginForm.classList.add('active');
+    registerForm.classList.remove('active');
+  } else {
+    loginTab.classList.remove('active');
+    registerTab.classList.add('active');
+    loginForm.classList.remove('active');
+    registerForm.classList.add('active');
+  }
+}
+
+function showError(message) {
+  const errorEl = document.getElementById('error-message');
+  errorEl.textContent = message;
+  errorEl.style.display = 'block';
+  setTimeout(() => {
+    errorEl.style.display = 'none';
+  }, 5000);
+}
+
+function showSuccess(message) {
+  const successEl = document.getElementById('success-message');
+  successEl.textContent = message;
+  successEl.style.display = 'block';
+  setTimeout(() => {
+    successEl.style.display = 'none';
+  }, 3000);
+}
+
+function hideMessages() {
+  document.getElementById('error-message').style.display = 'none';
+  document.getElementById('success-message').style.display = 'none';
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  hideMessages();
+  
+  const email = document.getElementById('login-email').value.trim();
+  const password = document.getElementById('login-password').value;
+  const btn = document.getElementById('login-btn');
+  
+  btn.disabled = true;
+  btn.textContent = 'Logging in...';
+  
+  try {
+    const response = await fetch('/api/login', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ email, password })
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok) {
+      localStorage.setItem('authToken', data.access_token);
+      showSuccess('Login successful! Redirecting...');
+      setTimeout(() => {
+        window.location.href = '/dashboard';
+      }, 1000);
+    } else {
+      showError(data.detail || 'Login failed. Please check your credentials.');
+      btn.disabled = false;
+      btn.textContent = 'Login';
+    }
+  } catch (error) {
+    console.error('Login error:', error);
+    showError('An error occurred. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Login';
+  }
+}
+
+async function handleRegister(event) {
+  event.preventDefault();
+  hideMessages();
+  
+  const name = document.getElementById('register-name').value.trim();
+  const email = document.getElementById('register-email').value.trim();
+  const password = document.getElementById('register-password').value;
+  const confirmPassword = document.getElementById('register-confirm').value;
+  const btn = document.getElementById('register-btn');
+  
+  // Validate email domain
+  if (!email.endsWith('@sigmoidanalytics.com')) {
+    showError('Only @sigmoidanalytics.com email addresses are allowed.');
+    return;
+  }
+  
+  // Validate password match
+  if (password !== confirmPassword) {
+    showError('Passwords do not match.');
+    return;
+  }
+  
+  // Validate password strength
+  if (password.length < 8) {
+    showError('Password must be at least 8 characters long.');
+    return;
+  }
+  
+  btn.disabled = true;
+  btn.textContent = 'Registering...';
+  
+  try {
+    const payload = { email, password };
+    if (name) {
+      payload.full_name = name;
+    }
+    
+    const response = await fetch('/api/register', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify(payload)
+    });
+    
+    const data = await response.json();
+    
+    if (response.ok) {
+      localStorage.setItem('authToken', data.access_token);
+      showSuccess('Registration successful! Redirecting...');
+      setTimeout(() => {
+        window.location.href = '/dashboard';
+      }, 1000);
+    } else {
+      showError(data.detail || 'Registration failed. Please try again.');
+      btn.disabled = false;
+      btn.textContent = 'Register';
+    }
+  } catch (error) {
+    console.error('Registration error:', error);
+    showError('An error occurred. Please try again.');
+    btn.disabled = false;
+    btn.textContent = 'Register';
+  }
+}
+
+// Check if already logged in
+if (localStorage.getItem('authToken')) {
+  window.location.href = '/dashboard';
+}
+</script>
+</body>
+</html>

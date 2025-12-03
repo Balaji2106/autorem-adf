@@ -1,0 +1,116 @@
+{
+  "cluster_id": "1121-055905-q5xcz4bm",
+  "creator_user_name": "balaji.mypati@sigmoidanalytics.com",
+  "driver": {
+    "private_ip": "10.139.64.10",
+    "public_dns": "20.84.50.184",
+    "node_id": "c90a1cb95f964214bee4266c626d90b9",
+    "instance_id": "94c6467b17114729bd9d35d8054863ae",
+    "start_timestamp": 1764233837532,
+    "node_type_id": "Standard_D4s_v3",
+    "node_attributes": {
+      "is_spot": false
+    },
+    "host_private_ip": "10.139.0.10"
+  },
+  "executors": [
+    {
+      "private_ip": "10.139.64.11",
+      "public_dns": "20.83.154.46",
+      "node_id": "dacb4701f1df42a69dc41a581206659d",
+      "instance_id": "b255e867cb52418195754350316438c5",
+      "start_timestamp": 1764233837589,
+      "node_type_id": "Standard_D4s_v3",
+      "node_attributes": {
+        "is_spot": false
+      },
+      "host_private_ip": "10.139.0.11"
+    }
+  ],
+  "spark_context_id": 6352803384433759152,
+  "driver_healthy": true,
+  "jdbc_port": 10000,
+  "cluster_name": "Balaji Mypati's Cluster 2025-11-21 11:28:31",
+  "spark_version": "16.4.x-scala2.12",
+  "azure_attributes": {
+    "first_on_demand": 1,
+    "availability": "SPOT_WITH_FALLBACK_AZURE",
+    "spot_bid_max_price": -1.0
+  },
+  "node_type_id": "Standard_D4s_v3",
+  "driver_node_type_id": "Standard_D4s_v3",
+  "autotermination_minutes": 30,
+  "enable_elastic_disk": true,
+  "disk_spec": {},
+  "cluster_source": "UI",
+  "single_user_name": "balaji.mypati@sigmoidanalytics.com",
+  "enable_local_disk_encryption": false,
+  "instance_source": {
+    "node_type_id": "Standard_D4s_v3"
+  },
+  "driver_instance_source": {
+    "node_type_id": "Standard_D4s_v3"
+  },
+  "data_security_mode": "LEGACY_SINGLE_USER_STANDARD",
+  "runtime_engine": "PHOTON",
+  "effective_spark_version": "16.4.x-photon-scala2.12",
+  "kind": "CLASSIC_PREVIEW",
+  "is_single_node": false,
+  "assigned_principal": "user:balaji.mypati@sigmoidanalytics.com",
+  "release_version": "16.4.13",
+  "state": "RUNNING",
+  "state_message": "",
+  "start_time": 1763704745619,
+  "last_state_loss_time": 1764233937279,
+  "last_activity_time": 1764233875963,
+  "last_restarted_time": 1764233937557,
+  "autoscale": {
+    "min_workers": 1,
+    "max_workers": 8,
+    "target_workers": 1
+  },
+  "cluster_memory_mb": 32768,
+  "cluster_cores": 8.0,
+  "default_tags": {
+    "Vendor": "Databricks",
+    "Creator": "balaji.mypati@sigmoidanalytics.com",
+    "ClusterName": "Balaji Mypati's Cluster 2025-11-21 11:28:31",
+    "ClusterId": "1121-055905-q5xcz4bm"
+  },
+  "init_scripts_safe_mode": false,
+  "spec": {
+    "cluster_name": "Balaji Mypati's Cluster 2025-11-21 11:28:31",
+    "spark_version": "16.4.x-scala2.12",
+    "azure_attributes": {
+      "first_on_demand": 1,
+      "availability": "SPOT_WITH_FALLBACK_AZURE",
+      "spot_bid_max_price": -1.0
+    },
+    "node_type_id": "Standard_D4s_v3",
+    "driver_node_type_id": "Standard_D4s_v3",
+    "autotermination_minutes": 30,
+    "enable_elastic_disk": true,
+    "disk_spec": {},
+    "cluster_source": "UI",
+    "single_user_name": "balaji.mypati@sigmoidanalytics.com",
+    "enable_local_disk_encryption": false,
+    "instance_source": {
+      "node_type_id": "Standard_D4s_v3"
+    },
+    "driver_instance_source": {
+      "node_type_id": "Standard_D4s_v3"
+    },
+    "data_security_mode": "LEGACY_SINGLE_USER_STANDARD",
+    "runtime_engine": "PHOTON",
+    "effective_spark_version": "16.4.x-photon-scala2.12",
+    "kind": "CLASSIC_PREVIEW",
+    "is_single_node": false,
+    "assigned_principal": "user:balaji.mypati@sigmoidanalytics.com",
+    "release_version": "16.4.13",
+    "autoscale": {
+      "min_workers": 1,
+      "max_workers": 8
+    },
+    "apply_policy_default_values": false
+  }
+}

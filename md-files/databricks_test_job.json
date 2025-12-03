@@ -1,0 +1,25 @@
+{
+  "name": "RCA_Test_Job_1764235504",
+  "tasks": [
+    {
+      "task_key": "test_failure_task",
+      "notebook_task": {
+        "notebook_path": "/Shared/RCA_Test_Failure",
+        "source": "WORKSPACE"
+      },
+      "new_cluster": {
+        "spark_version": "13.3.x-scala2.12",
+        "node_type_id": "Standard_DS3_v2",
+        "num_workers": 1
+      }
+    }
+  ],
+  "webhook_notifications": {
+    "on_failure": [
+      {
+        "id": "rca-test-webhook",
+        "url": "https://unepitaphed-brazenly-lola.ngrok-free.dev/databricks-monitor"
+      }
+    ]
+  }
+}

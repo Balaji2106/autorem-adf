@@ -1,0 +1,32 @@
+{
+  "cluster_id": "1121-055905-q5xcz4bm",
+  "num_workers": null,
+  "autoscale": {
+    "min_workers": 1,
+    "max_workers": 8,
+    "target_workers": 1
+  },
+  "cluster_name": "Balaji Mypati's Cluster 2025-11-21 11:28:31",
+  "spark_version": "16.4.x-scala2.12",
+  "node_type_id": "Standard_D4s_v3",
+  "driver_node_type_id": "Standard_D4s_v3",
+  "autotermination_minutes": 30,
+  "spark_conf": null,
+  "azure_attributes": {
+    "first_on_demand": 1,
+    "availability": "SPOT_WITH_FALLBACK_AZURE",
+    "spot_bid_max_price": -1.0
+  },
+  "custom_tags": null,
+  "init_scripts": null,
+  "cluster_log_conf": null,
+  "docker_image": null,
+  "runtime_engine": "PHOTON",
+  "spark_env_vars": null,
+  "enable_elastic_disk": true,
+  "data_security_mode": "LEGACY_SINGLE_USER_STANDARD",
+  "single_user_name": "balaji.mypati@sigmoidanalytics.com",
+  "policy_id": null,
+  "apply_policy_default_values": null,
+  "webhook_notifications": null
+}

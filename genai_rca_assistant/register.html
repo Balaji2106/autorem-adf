@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>Register - AIOps RCA</title>
+<style>
+  body{font-family:Segoe UI,Roboto,Arial;background:#0d1117;color:#e6eef6;display:flex;height:100vh;align-items:center;justify-content:center;margin:0}
+  .panel{background:#0f1720;padding:24px;border-radius:10px;border:1px solid #222426;width:420px}
+  h2{color:#58a6ff;margin:0 0 12px 0}
+  input{width:100%;padding:10px;margin:8px 0;border-radius:6px;border:1px solid #30363d;background:#071018;color:#e6eef6}
+  button{width:100%;padding:10px;border-radius:6px;border:0;background:#238636;color:#fff;font-weight:700;cursor:pointer}
+  .secondary{background:#21262d;border:1px solid #30363d;color:#c9d1d9;margin-top:8px}
+  .muted{color:#9aa6b2;font-size:13px}
+  a{color:#79c0ff;text-decoration:none}
+</style>
+</head>
+<body>
+  <div class="panel">
+    <h2>Create an account</h2>
+    <div class="muted" style="margin-bottom:10px;">Registration limited to <strong>@sigmoidanalytics.com</strong> addresses.</div>
+    <input id="full_name" placeholder="Full name" />
+    <input id="email" placeholder="you@sigmoidanalytics.com" />
+    <input id="password" placeholder="Password (min 8 chars)" type="password" />
+    <button onclick="register()">Create account</button>
+    <button class="secondary" onclick="gotoLogin()">Back to login</button>
+    <div id="msg" class="muted" style="margin-top:10px"></div>
+  </div>
+
+<script>
+async function register(){
+  const full_name=document.getElementById('full_name').value.trim();
+  const email=document.getElementById('email').value.trim();
+  const password=document.getElementById('password').value;
+  if(!full_name||!email||!password){ document.getElementById('msg').innerText='Fill all fields'; return; }
+  if(!email.endsWith('@sigmoidanalytics.com')){ document.getElementById('msg').innerText='Registration allowed only for @sigmoidanalytics.com'; return; }
+  if(password.length < 8){ document.getElementById('msg').innerText='Password too short'; return; }
+  const res=await fetch('/auth/register',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({full_name,email,password})});
+  const j = await res.json();
+  if(res.ok){ document.getElementById('msg').innerText = 'Registered. Redirecting to login...'; setTimeout(()=>window.location='/login.html',1200); return; }
+  document.getElementById('msg').innerText = j.error || 'Registration failed';
+}
+function gotoLogin(){ window.location='/login.html'; }
+</script>
+</body>
+</html>

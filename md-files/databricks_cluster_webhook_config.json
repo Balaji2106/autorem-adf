@@ -1,0 +1,22 @@
+{
+  "webhook_notifications": {
+    "on_start": [
+      {
+        "id": "rca-webhook-cluster-start-1764235441",
+        "url": "https://unepitaphed-brazenly-lola.ngrok-free.dev/databricks-monitor"
+      }
+    ],
+    "on_unexpected_termination": [
+      {
+        "id": "rca-webhook-cluster-terminated-1764235441",
+        "url": "https://unepitaphed-brazenly-lola.ngrok-free.dev/databricks-monitor"
+      }
+    ],
+    "on_failed_start": [
+      {
+        "id": "rca-webhook-cluster-failed-1764235441",
+        "url": "https://unepitaphed-brazenly-lola.ngrok-free.dev/databricks-monitor"
+      }
+    ]
+  }
+}

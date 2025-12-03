@@ -1,0 +1,11 @@
+backup_20251117
+data
+.env
+__pycache__
+tickets.db
+
+
+prompts
+aiops-proj-env
+.md
+.env.backup.20251127_150636
