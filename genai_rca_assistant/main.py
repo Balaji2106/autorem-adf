@@ -41,8 +41,18 @@ except ImportError:
 # --- Initialization & Configuration ---
 load_dotenv()
 RCA_API_KEY = os.getenv("RCA_API_KEY", "balaji-rca-secret-2025")
+
+# AI Provider Configuration
+AI_PROVIDER = os.getenv("AI_PROVIDER", "gemini").lower()  # Options: gemini, ollama, auto
+
+# Gemini Configuration
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")
 MODEL_ID = os.getenv("MODEL_ID", "models/gemini-2.5-flash")
+
+# Ollama Configuration
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "deepseek-r1:latest")
+
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN", "")
 SLACK_ALERT_CHANNEL = os.getenv("SLACK_ALERT_CHANNEL", "aiops-rca-alerts")
 PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "http://localhost:8000")
@@ -625,6 +635,126 @@ Error Message:
         logger.warning("Gemini RCA failed: %s", e)
         return None
 
+def call_ollama_for_rca(description: str, source_type: str = "adf"):
+    """
+    Generate RCA using Ollama (local LLM like DeepSeek-R1) for both ADF and Databricks errors
+    source_type: "adf" or "databricks"
+    """
+    if not OLLAMA_HOST:
+        logger.warning("Ollama host not configured")
+        return None
+
+    # Define error types based on source
+    if source_type == "databricks":
+        error_types = """[DatabricksClusterStartFailure, DatabricksJobExecutionError, DatabricksNotebookExecutionError,
+DatabricksLibraryInstallationError, DatabricksPermissionDenied, DatabricksResourceExhausted,
+DatabricksDriverNotResponding, DatabricksSparkException, DatabricksTableNotFound,
+DatabricksAuthenticationError, DatabricksTimeoutError, UnknownError]"""
+        service_name = "Databricks"
+    else:
+        error_types = """[UserErrorSourceBlobNotExists, UserErrorColumnNameInvalid, GatewayTimeout,
+HttpConnectionFailed, InternalServerError, UserErrorInvalidDataType, UserErrorSqlOperationFailed,
+AuthenticationError, ThrottlingError, UnknownError]"""
+        service_name = "Azure Data Factory"
+
+    service_prefixed_desc = f"[{service_name.upper()}] {description}"
+
+    prompt = f"""
+You are an expert AIOps Root Cause Analysis assistant for {service_name}.
+
+CRITICAL: This error is from {service_name.upper()}, NOT from any other Azure service.
+DO NOT mention Azure Data Factory if this is a Databricks error.
+DO NOT mention Databricks if this is an Azure Data Factory error.
+
+Analyze the following {service_name} failure message and provide a precise, data-driven Root Cause Analysis.
+
+Your `error_type` MUST be a machine-readable code. Choose from this list:
+{error_types}
+
+Return a STRICT JSON in this format (NO markdown, NO extra text, NO thinking tags):
+{{
+  "root_cause": "Clear, concise explanation of what went wrong in {service_name}",
+  "error_type": "...",
+  "affected_entity": "Name of the specific resource/component that failed",
+  "severity": "Critical|High|Medium|Low",
+  "priority": "P1|P2|P3|P4",
+  "confidence": "Very High|High|Medium|Low",
+  "recommendations": ["Step 1: ...", "Step 2: ...", "Step 3: ..."],
+  "auto_heal_possible": true|false
+}}
+
+Severity Guidelines:
+- Critical: Production data loss, complete service outage, security breach
+- High: Major functionality broken, significant business impact
+- Medium: Partial functionality affected, workarounds available
+- Low: Minor issues, minimal business impact
+
+Priority Guidelines:
+- P1: Fix immediately (< 15 min) - Production down, Critical severity
+- P2: Fix within 30 min - High severity, major impact
+- P3: Fix within 2 hours - Medium severity
+- P4: Fix within 24 hours - Low severity
+
+IMPORTANT: In your root_cause, explicitly mention "{service_name}" (not any other service).
+Analyze logically - don't invent details. Use only what's in the message.
+Be specific about the affected entity (cluster name, job name, table name, etc.)
+
+Error Message:
+\"\"\"{service_prefixed_desc}\"\"\"
+
+Respond with ONLY the JSON object, no thinking tags, no markdown.
+"""
+
+    try:
+        # Call Ollama API
+        url = f"{OLLAMA_HOST.rstrip('/')}/api/generate"
+        payload = {
+            "model": OLLAMA_MODEL,
+            "prompt": prompt,
+            "stream": False,
+            "format": "json"
+        }
+
+        logger.info(f"[OLLAMA] Calling Ollama at {url} with model {OLLAMA_MODEL}")
+        response = requests.post(url, json=payload, timeout=120)
+
+        if response.status_code == 200:
+            result = response.json()
+            response_text = result.get("response", "")
+
+            # Clean up response - remove thinking tags if present (DeepSeek-R1 specific)
+            # DeepSeek-R1 sometimes wraps responses in <think>...</think> tags
+            if "<think>" in response_text:
+                # Extract only the JSON part after thinking
+                parts = response_text.split("</think>")
+                if len(parts) > 1:
+                    response_text = parts[-1].strip()
+
+            # Clean up markdown if present
+            response_text = response_text.strip().strip("`").replace("json", "").strip()
+
+            # Parse JSON
+            rca_data = json.loads(response_text)
+            logger.info(f"[OLLAMA] Successfully generated RCA using Ollama")
+            return rca_data
+        else:
+            logger.error(f"[OLLAMA] Ollama API returned status {response.status_code}: {response.text}")
+            return None
+
+    except requests.exceptions.Timeout:
+        logger.error("[OLLAMA] Ollama request timed out (120s)")
+        return None
+    except requests.exceptions.ConnectionError as e:
+        logger.error(f"[OLLAMA] Cannot connect to Ollama at {OLLAMA_HOST}: {e}")
+        return None
+    except json.JSONDecodeError as e:
+        logger.error(f"[OLLAMA] Failed to parse Ollama response as JSON: {e}")
+        logger.error(f"[OLLAMA] Raw response: {response_text[:500]}")
+        return None
+    except Exception as e:
+        logger.warning(f"[OLLAMA] Ollama RCA failed: {e}")
+        return None
+
 def derive_priority(sev):
     sev = (sev or "").lower()
     return {"critical":"P1","high":"P2","medium":"P3","low":"P4"}.get(sev,"P3")
@@ -647,12 +777,67 @@ def fallback_rca(desc: str, source_type: str = "adf"):
     }
 
 def generate_rca_and_recs(desc, source_type="adf"):
-    ai = call_ai_for_rca(desc, source_type)
-    if ai:
-        ai.setdefault("priority", derive_priority(ai.get("severity")))
-        logger.info("AI RCA successful for %s", source_type.upper())
-        return ai
-    logger.warning("AI RCA failed for %s. Using fallback.", source_type.upper())
+    """
+    Generate RCA using configured AI provider(s)
+    AI_PROVIDER options: 'gemini', 'ollama', 'auto'
+    - gemini: Use Google Gemini only
+    - ollama: Use local Ollama only
+    - auto: Try Ollama first, fallback to Gemini, then to static fallback
+    """
+    ai = None
+
+    if AI_PROVIDER == "ollama":
+        # Use Ollama only
+        logger.info(f"[AI-PROVIDER] Using Ollama for RCA generation")
+        ai = call_ollama_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Ollama RCA successful for %s", source_type.upper())
+            return ai
+        logger.warning("Ollama RCA failed for %s. Using fallback.", source_type.upper())
+
+    elif AI_PROVIDER == "gemini":
+        # Use Gemini only
+        logger.info(f"[AI-PROVIDER] Using Gemini for RCA generation")
+        ai = call_ai_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Gemini RCA successful for %s", source_type.upper())
+            return ai
+        logger.warning("Gemini RCA failed for %s. Using fallback.", source_type.upper())
+
+    elif AI_PROVIDER == "auto":
+        # Auto mode: Try Ollama first, then Gemini, then fallback
+        logger.info(f"[AI-PROVIDER] Auto mode: Trying Ollama first, then Gemini")
+
+        # Try Ollama first
+        ai = call_ollama_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Ollama RCA successful for %s", source_type.upper())
+            return ai
+
+        logger.info("[AI-PROVIDER] Ollama failed, trying Gemini...")
+
+        # Try Gemini as fallback
+        ai = call_ai_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Gemini RCA successful for %s", source_type.upper())
+            return ai
+
+        logger.warning("Both Ollama and Gemini RCA failed for %s. Using fallback.", source_type.upper())
+
+    else:
+        # Unknown provider, default to Gemini
+        logger.warning(f"[AI-PROVIDER] Unknown AI_PROVIDER '{AI_PROVIDER}', defaulting to Gemini")
+        ai = call_ai_for_rca(desc, source_type)
+        if ai:
+            ai.setdefault("priority", derive_priority(ai.get("severity")))
+            logger.info("Gemini RCA successful for %s", source_type.upper())
+            return ai
+
+    # All AI attempts failed, use static fallback
     return fallback_rca(desc, source_type)
 
 # --- ITSM Integration Functions ---
