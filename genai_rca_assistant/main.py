@@ -125,6 +125,12 @@ REMEDIABLE_ERRORS: Dict[str, Dict] = {
         "backoff_seconds": [30, 60, 120, 300, 600],
         "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
     },
+    "InternalServerError": {
+        "action": "retry_pipeline",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_PIPELINE")
+    },
 
     # Databricks Cluster Errors
     "DatabricksClusterStartFailure": {
@@ -134,6 +140,18 @@ REMEDIABLE_ERRORS: Dict[str, Dict] = {
         "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
     },
     "ClusterMemoryExhausted": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
+    },
+    "DatabricksResourceExhausted": {
+        "action": "restart_cluster",
+        "max_retries": 2,
+        "backoff_seconds": [60, 180],
+        "playbook_url": os.getenv("PLAYBOOK_RESTART_CLUSTER")
+    },
+    "DatabricksDriverNotResponding": {
         "action": "restart_cluster",
         "max_retries": 2,
         "backoff_seconds": [60, 180],
@@ -161,14 +179,16 @@ REMEDIABLE_ERRORS: Dict[str, Dict] = {
         "backoff_seconds": [30, 60, 120],
         "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB")
     },
-
-    # Conditional Remediation
-    "UserErrorSourceBlobNotExists": {
-        "action": "check_upstream",
-        "max_retries": 2,
-        "backoff_seconds": [300, 600],  # Wait 5 min, then 10 min
-        "playbook_url": os.getenv("PLAYBOOK_RERUN_UPSTREAM")
+    "DatabricksTimeoutError": {
+        "action": "retry_job",
+        "max_retries": 3,
+        "backoff_seconds": [30, 60, 120],
+        "playbook_url": os.getenv("PLAYBOOK_RETRY_JOB")
     },
+
+    # NOTE: UserErrorSourceBlobNotExists is NOT auto-remediable
+    # Requires manual investigation (missing data, wrong path, upstream issue)
+    # Removed from this list to prevent incorrect auto-remediation
 }
 
 # Azure ADF API Configuration for monitoring
