@@ -82,23 +82,28 @@ az deployment group create \
   --parameters adf-logicapp-parameters.json
 ```
 
-### Step 3: Grant Permissions
+### Step 3: Authorize ADF API Connection
 
-The Logic App uses Managed Identity to call ADF API. Grant it permissions:
+The Logic App uses an **ADF API Connection** (not Managed Identity). You need to authorize it:
+
+**Option A: Via Azure Portal (Recommended)**
+
+1. Go to Azure Portal → Resource Groups → `rg-auto-remediation`
+2. Find the API Connection: `azuredatafactory`
+3. Click on it → Left menu → **Edit API connection**
+4. Click **Authorize** button
+5. Sign in with your Azure account
+6. Click **Save**
+
+**Option B: Via Azure CLI**
 
 ```bash
-# Get Logic App's Managed Identity Principal ID (from deployment output)
-PRINCIPAL_ID=$(az deployment group show \
-  --resource-group rg-auto-remediation \
-  --name <deployment-name> \
-  --query properties.outputs.principalId.value -o tsv)
-
-# Grant Contributor role on ADF
-az role assignment create \
-  --assignee $PRINCIPAL_ID \
-  --role "Contributor" \
-  --scope "/subscriptions/YOUR_SUBSCRIPTION_ID/resourceGroups/YOUR_ADF_RESOURCE_GROUP/providers/Microsoft.DataFactory/factories/YOUR_DATA_FACTORY_NAME"
+# The API Connection was created during deployment
+# You can authorize it programmatically (if needed)
+# Or just use the Azure Portal method above
 ```
+
+**IMPORTANT:** Without authorization, the Logic App will fail with "AuthorizationFailed" error.
 
 ### Step 4: Get Webhook URL
 
