@@ -2009,12 +2009,13 @@ async def azure_monitor(request: Request):
 
     logger.info("ADF Error being sent to Gemini:\n%s", desc[:500])
 
-    # ** DEDUPLICATION CHECK**
+    # ** ENHANCED DEDUPLICATION CHECK **
+    # Check 1: Exact run_id match
     if runid:
         existing = db_query("SELECT id, status FROM tickets WHERE run_id = :run_id",
                            {"run_id": runid}, one=True)
         if existing:
-            logger.warning(f"WARNING: DUPLICATE DETECTED: run_id {runid} already has ticket {existing['id']}")
+            logger.warning(f"WARNING: DUPLICATE DETECTED (run_id): run_id {runid} already has ticket {existing['id']}")
             log_audit(
                 ticket_id=existing["id"],
                 action="Duplicate Run Detected",
@@ -2028,6 +2029,34 @@ async def azure_monitor(request: Request):
                 "message": f"Ticket already exists for run_id {runid}",
                 "existing_status": existing.get("status")
             })
+
+    # Check 2: Time-based deduplication (same pipeline within 2 minutes)
+    # Prevents Azure Monitor from creating multiple tickets for the same failure
+    time_threshold = (datetime.utcnow() - timedelta(minutes=2)).isoformat()
+    recent_ticket = db_query("""
+        SELECT id, status, timestamp FROM tickets
+        WHERE pipeline = :pipeline
+        AND timestamp > :threshold
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """, {"pipeline": pipeline, "threshold": time_threshold}, one=True)
+
+    if recent_ticket:
+        logger.warning(f"WARNING: DUPLICATE DETECTED (time-based): Pipeline {pipeline} already has recent ticket {recent_ticket['id']} created at {recent_ticket['timestamp']}")
+        log_audit(
+            ticket_id=recent_ticket["id"],
+            action="Duplicate Alert Suppressed",
+            pipeline=pipeline,
+            run_id=runid or "N/A",
+            details=f"Azure Monitor sent duplicate alert for pipeline {pipeline} within 2 minutes. Suppressing duplicate. Original ticket: {recent_ticket['id']}"
+        )
+        return JSONResponse({
+            "status": "duplicate_ignored_time_based",
+            "ticket_id": recent_ticket["id"],
+            "message": f"Recent ticket exists for pipeline {pipeline} (created {recent_ticket['timestamp']})",
+            "existing_status": recent_ticket.get("status"),
+            "deduplication_reason": "Same pipeline failure within 2 minutes"
+        })
 
     finops_tags = extract_finops_tags(pipeline)
     rca = generate_rca_and_recs(desc)
@@ -2326,8 +2355,9 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
     logger.info(f"Processing {'Cluster' if is_cluster_failure else 'Job'} Failure")
 
     # -----------------------
-    # DUPLICATE CHECK FOR JOB FAILURES
+    # ENHANCED DUPLICATE CHECK FOR JOB FAILURES
     # -----------------------
+    # Check 1: Exact run_id match
     if run_id:
         existing = db_query(
             "SELECT id, status FROM tickets WHERE run_id = :run_id",
@@ -2335,12 +2365,46 @@ async def process_databricks_failure(job_name, run_id, job_id, cluster_id, error
             one=True
         )
         if existing:
-            logger.warning(f"❗ Duplicate Databricks run detected: run_id={run_id}")
+            logger.warning(f"❗ Duplicate Databricks run detected (run_id): run_id={run_id}, existing ticket={existing['id']}")
+            log_audit(
+                ticket_id=existing["id"],
+                action="Duplicate Run Detected",
+                pipeline=job_name,
+                run_id=run_id,
+                details=f"Databricks webhook attempted to create duplicate ticket for run_id {run_id}. Original ticket: {existing['id']}"
+            )
             return {
                 "status": "duplicate_ignored",
                 "ticket_id": existing["id"],
                 "message": f"Ticket already exists for run_id {run_id}"
             }
+
+    # Check 2: Time-based deduplication (same job within 2 minutes)
+    time_threshold = (datetime.utcnow() - timedelta(minutes=2)).isoformat()
+    recent_ticket = db_query("""
+        SELECT id, status, timestamp FROM tickets
+        WHERE pipeline = :job_name
+        AND timestamp > :threshold
+        ORDER BY timestamp DESC
+        LIMIT 1
+    """, {"job_name": job_name, "threshold": time_threshold}, one=True)
+
+    if recent_ticket:
+        logger.warning(f"❗ Duplicate Databricks job detected (time-based): Job {job_name} already has recent ticket {recent_ticket['id']} created at {recent_ticket['timestamp']}")
+        log_audit(
+            ticket_id=recent_ticket["id"],
+            action="Duplicate Alert Suppressed",
+            pipeline=job_name,
+            run_id=run_id or "N/A",
+            details=f"Databricks sent duplicate alert for job {job_name} within 2 minutes. Suppressing duplicate. Original ticket: {recent_ticket['id']}"
+        )
+        return {
+            "status": "duplicate_ignored_time_based",
+            "ticket_id": recent_ticket["id"],
+            "message": f"Recent ticket exists for job {job_name} (created {recent_ticket['timestamp']})",
+            "existing_status": recent_ticket.get("status"),
+            "deduplication_reason": "Same job failure within 2 minutes"
+        }
 
     # -----------------------
     # FINOPS TAG EXTRACTION
