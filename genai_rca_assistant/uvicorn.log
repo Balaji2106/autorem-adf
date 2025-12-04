@@ -1,0 +1,15 @@
+INFO:     Will watch for changes in these directories: ['/home/sigmoid/Documents/git/v2-demo-autoremediation/demo-autoremediation-claude-webhook-error-logs-analysis-017nyrLJCAtf2RdhCJ8RvVbc/genai_rca_assistant']
+INFO:     Uvicorn running on http://0.0.0.0:8000 (Press CTRL+C to quit)
+INFO:     Started reloader process [121452] using WatchFiles
+2025-12-03 21:19:50,016 [INFO] audit-logs
+INFO:     Started server process [121472]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     14.97.164.46:0 - "GET /api/open-tickets HTTP/1.1" 200 OK
+INFO:     14.97.164.46:0 - "GET /api/closed-tickets HTTP/1.1" 200 OK
+INFO:     14.97.164.46:0 - "GET /api/in-progress-tickets HTTP/1.1" 200 OK
+INFO:     Shutting down
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [121472]
+INFO:     Stopping reloader process [121452]
